@@ -24,10 +24,11 @@ ins UsrIns;
  *      - 探路(村民找金矿,侦察骑兵找敌方基地)
  *      - 防守(敌人靠近就收拢村民,箭塔和士兵守家)
  *      - 指挥军队打架
- *  3. 游戏分三个阶段:
- *      阶段0:前期发展,攒资源,升到铜器时代
- *      阶段1:铜器时代,防守敌人三波进攻,同时造兵
- *      阶段2:反攻,进攻敌方基地,用祭司转化武器工程厂获胜
+ *  3. 游戏分四个阶段:
+ *      阶段1:游戏开始,探路和采集资源(第一波之前)
+ *      阶段2:防御第一波攻击,升级铜器(第一波到来~铜器升级完成)
+ *      阶段3:防御第二、三波攻击,规模化造兵
+ *      阶段4:进攻敌人基地,完成胜利目标
  * ===================================================================== */
 
 /* ---------- 工种编号(村民现在在干什么) ---------- */
@@ -42,7 +43,7 @@ ins UsrIns;
 #define WORK_EXPLORE 8   //探路
 
 /* ---------- 全局变量(跨帧保存的) ---------- */
-static int gameStage = 0;                 //当前游戏阶段,0是前期,1是铜器,2是反攻
+static int gameStage = 1;                 //当前游戏阶段,1游戏开始探路采集,2防御第一波升级铜器,3防御第二三波造兵,4反攻
 static int townX = -1;                    //市镇中心的块坐标X
 static int townY = -1;                    //市镇中心的块坐标Y
 static int waveFlag = 0;                  //当前打到第几波(0还没打,1第一波,2第二波,3第三波)
@@ -518,8 +519,8 @@ void UsrAI::assignWork(const tagInfo& info)
 
         //根据现在的缺人情况,决定让他干什么活
         int chooseWork = WORK_WOOD;    //默认去砍树
-        if (gameStage == 0) {
-            //前期:浆果、木头为主,石头金矿各1个,1个打猎
+        if (gameStage <= 2) {
+            //阶段1+2(游戏开始+防御第一波):浆果、木头为主,石头金矿各1个,1个打猎
             if (numBerry < 3) {
                 chooseWork = WORK_BERRY;
             } else if (numStone < 1) {
@@ -600,8 +601,8 @@ void UsrAI::buildHouse(const tagInfo& info)
     //看看现在有几间房子,前期盖到6间,铜器后盖到12间(每间4人口,房子少了人口上限不够)
     int houseNum = countBuilding(info, BUILDING_HOME);
     int wantHouse = 6;
-    if (gameStage >= 1) {
-        wantHouse = 12;
+    if (gameStage >= 3) {
+        wantHouse = 12;    //铜器后(阶段2+)12间房子
     }
     if (houseNum >= wantHouse) {
         return;    //房子够了
@@ -770,8 +771,8 @@ void UsrAI::buildFarm(const tagInfo& info)
         }
     }
     int wantFarm = 2;
-    if (gameStage >= 1) {
-        wantFarm = 6;
+    if (gameStage >= 3) {
+        wantFarm = 6;    //铜器后(阶段2+)6块农田
     }
     if (liveFarm >= wantFarm) {
         return;
@@ -978,7 +979,7 @@ void UsrAI::researchTech(const tagInfo& info)
     }
 
     //谷仓研究箭塔升级(铜器时代,箭塔加1攻击加1射程,第二波前研究完)
-    if (gameStage >= 1 && !hasTowerUpTech
+    if (gameStage >= 3 && !hasTowerUpTech
         && info.Meat >= BUILDING_GRANARY_UPGRADE_ARROWTOWER_FOOD
         && info.Stone >= BUILDING_GRANARY_UPGRADE_ARROWTOWER_STONE) {
         int granarySN = findBuilding(info, BUILDING_GRANARY);
@@ -1190,8 +1191,8 @@ void UsrAI::makeVillager(const tagInfo& info)
     //村民养到14个就够了,铜器后16个,剩下的人口全部用来造兵
     //(兵少了第二波都顶不住,经济够用就行)
     int wantVillager = 14;
-    if (gameStage >= 1) {
-        wantVillager = 16;
+    if (gameStage >= 3) {
+        wantVillager = 16;    //铜器后(阶段2+)16个村民
     }
     //食物够,村民不够,人口没满,就可以生产
     if (villagerNum < wantVillager && info.Meat >= BUILDING_CENTER_CREATEFARMER_FOOD) {
@@ -1271,15 +1272,15 @@ void UsrAI::makeArmy(const tagInfo& info)
     if (info.GameFrame >= 21000) {
         wantArmy = 22;                //第三波前:22个
     }
-    if (gameStage == 2) {
-        wantArmy = 26;                //反攻:26个
+    if (gameStage == 4) {
+        wantArmy = 26;                //反攻(阶段4):26个
     }
     if ((int)info.armies.size() >= wantArmy) {
         return;
     }
 
     //========== 学院:方阵兵(铜器主力,血厚攻高,顶在第一排) ==========
-    if (gameStage >= 1) {
+    if (gameStage >= 3) {
         int collageSN = findBuilding(info, BUILDING_COLLAGE);
         if (collageSN >= 0) {
             bool collageBusy = false;
@@ -1358,7 +1359,7 @@ void UsrAI::makeArmy(const tagInfo& info)
     }
 
     //========== 马厩:侦察骑兵(探路用,2个就够) ==========
-    if (gameStage >= 1) {
+    if (gameStage >= 3) {
         int stableSN = findBuilding(info, BUILDING_STABLE);
         if (stableSN >= 0) {
             bool stableBusy = false;
@@ -1389,8 +1390,8 @@ void UsrAI::makeArmy(const tagInfo& info)
  * ===================================================================== */
 void UsrAI::armyFight(const tagInfo& info)
 {
-    //反攻阶段不管防守,统一由attackEnemyBase带队
-    if (gameStage == 2) {
+    //反攻阶段(阶段4)不管防守,统一由attackEnemyBase带队
+    if (gameStage == 4) {
         return;
     }
 
@@ -1663,8 +1664,8 @@ void UsrAI::defendBase(const tagInfo& info)
 
 /* =====================================================================
  *  探路
- *  阶段0:派一个村民满地图找金矿(8个方向轮着走)
- *  阶段1:村民解放,改用跑得快的侦察骑兵找敌方基地
+ *  阶段1+2:派一个村民满地图找金矿(8个方向轮着走,还没铜器没有侦察骑兵)
+ *  阶段3+:村民解放,改用跑得快的侦察骑兵找敌方基地
  *  另外:只要看到敌方建筑,就顺手把敌方基地的位置记下来,反攻要用
  * ===================================================================== */
 void UsrAI::exploreMap(const tagInfo& info)
@@ -1680,8 +1681,8 @@ void UsrAI::exploreMap(const tagInfo& info)
         }
     }
 
-    if (gameStage == 0) {
-        //========== 阶段0:村民找金矿 ==========
+    if (gameStage <= 2) {
+        //========== 阶段1+2(游戏开始+防御第一波):村民找金矿(还没铜器,没有侦察骑兵) ==========
         //如果已经找到金矿了,就把他解放出来回去干活
         int goldSN = findResource(info, RESOURCE_GOLD, townX, townY);
         if (goldSN >= 0) {
@@ -1844,8 +1845,8 @@ void UsrAI::exploreMap(const tagInfo& info)
  * ===================================================================== */
 void UsrAI::priestBehavior(const tagInfo& info)
 {
-    //反攻阶段交给attackEnemyBase管
-    if (gameStage >= 2) {
+    //反攻阶段(阶段3)交给attackEnemyBase管
+    if (gameStage >= 4) {
         return;
     }
 
@@ -2068,8 +2069,8 @@ void UsrAI::priestBehavior(const tagInfo& info)
  * ===================================================================== */
 void UsrAI::attackEnemyBase(const tagInfo& info)
 {
-    //没到反攻阶段就返回
-    if (gameStage != 2) {
+    //没到反攻阶段(阶段3)就返回
+    if (gameStage != 4) {
         return;
     }
     //如果还不知道敌方基地在哪,先派侦察骑兵(或者随便一个士兵)去找
@@ -2391,13 +2392,20 @@ void UsrAI::strategyMain(const tagInfo& info)
     priestBehavior(info); // 保护祭司
 
 
-    //判断阶段:升到铜器时代就进入阶段1
-    if (gameStage == 0 && info.civilizationStage == CIVILIZATION_BRONZEAGE) {
-        gameStage = 1;
+    //按照攻略4阶段划分:
+    //阶段1:游戏开始,探路和采集资源(第一波之前)
+    //阶段2:防御第一波攻击,升级铜器(第一波到来~铜器升级完成)
+    //阶段3:防御第二、三波攻击,规模化造兵
+    //阶段4:进攻敌人基地,完成胜利目标
+    if (gameStage == 1 && info.GameFrame >= 6000) {
+        gameStage = 2;    //第一波来了(约4分钟),进入防御第一波阶段
+    }
+    if (gameStage == 2 && info.civilizationStage == CIVILIZATION_BRONZEAGE) {
+        gameStage = 3;    //升到铜器时代了,进入规模化造兵阶段
     }
     //第三波打完之后(大概16分钟)开始反攻
-    if (gameStage == 1 && waveFlag >= 3 && info.GameFrame >= 24000) {
-        gameStage = 2;
+    if (gameStage == 3 && waveFlag >= 3 && info.GameFrame >= 24000) {
+        gameStage = 4;
     }
 
     //按照顺序做事情(造兵永远比研究科技优先)
@@ -2415,16 +2423,16 @@ void UsrAI::strategyMain(const tagInfo& info)
     if (hasArrowTech) {
         buildSomeBuilding(info, BUILDING_ARROWTOWER);   //有科技了盖箭塔
     }
-    if (gameStage >= 1) {
-        buildSomeBuilding(info, BUILDING_COLLAGE);      //铜器时代盖学院
+    if (gameStage >= 3) {
+        buildSomeBuilding(info, BUILDING_COLLAGE);      //铜器时代(阶段2+)盖学院
     }
     assignWork(info);        //给村民安排工作
     exploreMap(info);        //探路
     armyFight(info);         //军队打架
     towerFight(info);        //箭塔自动攻击射程内的敌人
     defendBase(info);        //防守
-    if (gameStage == 2) {
-        attackEnemyBase(info);   //反攻
+    if (gameStage == 4) {
+        attackEnemyBase(info);   //反攻(阶段3)
     }
 
     //如果建筑都盖完了,把专门盖房子的人解放出来
@@ -2432,8 +2440,8 @@ void UsrAI::strategyMain(const tagInfo& info)
     if (countBuilding(info, BUILDING_HOME) < 6) {
         needBuild = true;    //前期至少6间房子
     }
-    if (gameStage >= 1 && countBuilding(info, BUILDING_HOME) < 12) {
-        needBuild = true;    //铜器至少12间房子
+    if (gameStage >= 3 && countBuilding(info, BUILDING_HOME) < 12) {
+        needBuild = true;    //铜器(阶段2+)至少12间房子
     }
     if (findBuilding(info, BUILDING_MARKET) < 0) {
         needBuild = true;
@@ -2453,8 +2461,8 @@ void UsrAI::strategyMain(const tagInfo& info)
     if (countBuilding(info, BUILDING_FARM) < 2) {
         needBuild = true;    //农田不能少于2块
     }
-    if (gameStage == 1 && findBuilding(info, BUILDING_COLLAGE) < 0) {
-        needBuild = true;
+    if (gameStage == 3 && findBuilding(info, BUILDING_COLLAGE) < 0) {
+        needBuild = true;    //阶段3(铜器防守)需要学院
     }
     if (!needBuild) {
         //把空闲的建造工改成没工作,让分配工作的函数重新给他安排
