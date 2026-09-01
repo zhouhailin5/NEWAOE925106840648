@@ -72,6 +72,8 @@ static bool hasAgeUp = false;             //是否已经让市镇中心升级时
 static int exploreSN = -1;                //派出去探路的村民编号
 static int exploreIndex = 0;              //探路方向轮换用的
 static int scanIndex = 0;                 //反攻时侦察兵方向轮换用的
+static int priestLastBlood = -1;          //祭司上一帧血量,受击立刻逃跑用
+static bool baseUnderAttack = false;      //基地是否被攻击(敌人靠近时村民不出去干活,避免徘徊)
 
 //地图信息(0是草地,1是海洋,-1是没探索过)
 static int gameMap[100][100];
@@ -1591,31 +1593,51 @@ void UsrAI::defendBase(const tagInfo& info)
         waveFlag = 3;    //第三波来了,大概14分钟的时候
     }
 
-    //看看有没有敌人摸到基地附近(以市镇中心为圆心)
+    //看看有没有敌人摸到基地附近(以市镇中心为圆心),同时记录最近敌人的位置
     bool enemyNearBase = false;
+    int nearestEnemyX = -1;
+    int nearestEnemyY = -1;
+    double nearestEnemyDist = 999999.0;
     for (unsigned int i = 0; i < info.enemy_armies.size(); i++) {
-        if (distanceBlock(info.enemy_armies[i].BlockDR, info.enemy_armies[i].BlockUR, townX, townY) <= 14.0) {
+        double d = distanceBlock(info.enemy_armies[i].BlockDR, info.enemy_armies[i].BlockUR, townX, townY);
+        if (d <= 14.0) {
             enemyNearBase = true;
-            break;
-        }
-    }
-    if (!enemyNearBase) {
-        for (unsigned int i = 0; i < info.enemy_farmers.size(); i++) {
-            if (distanceBlock(info.enemy_farmers[i].BlockDR, info.enemy_farmers[i].BlockUR, townX, townY) <= 14.0) {
-                enemyNearBase = true;
-                break;
+            if (d < nearestEnemyDist) {
+                nearestEnemyDist = d;
+                nearestEnemyX = info.enemy_armies[i].BlockDR;
+                nearestEnemyY = info.enemy_armies[i].BlockUR;
             }
         }
     }
+    for (unsigned int i = 0; i < info.enemy_farmers.size(); i++) {
+        double d = distanceBlock(info.enemy_farmers[i].BlockDR, info.enemy_farmers[i].BlockUR, townX, townY);
+        if (d <= 14.0) {
+            enemyNearBase = true;
+            if (d < nearestEnemyDist) {
+                nearestEnemyDist = d;
+                nearestEnemyX = info.enemy_farmers[i].BlockDR;
+                nearestEnemyY = info.enemy_farmers[i].BlockUR;
+            }
+        }
+    }
+    baseUnderAttack = enemyNearBase;    //更新基地状态,assignWork会看这个决定要不要分配工作
     if (!enemyNearBase) {
         return;    //基地附近没有敌人,村民安心干活
     }
 
-    //有敌人靠近,把在外面干活的村民都叫回家(已经在家附近的就不用动)
+    //有敌人靠近:只把离敌人5格内的村民叫回家(这些村民真的有危险),
+    //离敌人远的村民继续干活,不干预(不然会被反复叫回家形成徘徊)
     for (unsigned int i = 0; i < info.farmers.size(); i++) {
         const tagFarmer& farmer = info.farmers[i];
         if (farmer.FarmerSort != 0) {
             continue;    //渔船、运输船不管
+        }
+        //只撤退离敌人5格内的村民,远的继续采集
+        if (nearestEnemyX >= 0) {
+            double distToEnemy = distanceBlock(farmer.BlockDR, farmer.BlockUR, nearestEnemyX, nearestEnemyY);
+            if (distToEnemy > 5.0) {
+                continue;
+            }
         }
         //已经空闲(在家待着)或者已经离市镇中心很近了,就不管
         if (farmer.NowState == HUMAN_STATE_IDLE) {
@@ -1826,13 +1848,39 @@ void UsrAI::priestBehavior(const tagInfo& info)
     double priestDR = 0.0;
     double priestUR = 0.0;
     if (!findPriest(info, priestSN, priestX, priestY, priestDR, priestUR)) {
+        priestLastBlood = -1;    //祭司没了,重置血量记录
         return;    //没有祭司(祭司死了游戏就输了)
     }
+
+    //拿祭司当前血量(检测受击用,findPriest不返回血量)
+    int priestBlood = 0;
+    for (unsigned int i = 0; i < info.armies.size(); i++) {
+        if (info.armies[i].SN == priestSN) {
+            priestBlood = info.armies[i].Blood;
+            break;
+        }
+    }
+
+    //受击检测:血量比上一帧少,说明正在被打,先记下来(拿到安全点后立刻跑)
+    bool underAttack = false;
+    if (priestLastBlood >= 0 && priestBlood < priestLastBlood) {
+        underAttack = true;
+    }
+    priestLastBlood = priestBlood;    //更新血量记录
 
     //找安全点(箭塔旁或市镇中心旁)
     int safeX = 0;
     int safeY = 0;
     if (!findPriestSafeSpot(info, safeX, safeY)) {
+        return;
+    }
+
+    //受击了:最紧急,立刻往安全点跑(有箭塔和军队保护),3帧就能改一次方向
+    if (underAttack) {
+        if (canOrder(priestSN, 3)) {
+            HumanMove(priestSN, detailOf(safeX), detailOf(safeY));
+            rememberOrder(priestSN);
+        }
         return;
     }
 
@@ -1862,25 +1910,98 @@ void UsrAI::priestBehavior(const tagInfo& info)
         }
     }
 
-    //敌人离祭司太近(14格以内)就要跑,往远离敌人的方向跑
-    const double dangerDist = 14.0;
-    if (enemySN >= 0 && enemyDist <= dangerDist) {
-        double dx = priestDR - enemyDR;
-        double dy = priestUR - enemyUR;
-        double len = sqrt(dx * dx + dy * dy);
-        if (len > 0.001) {
-            double runDR = priestDR + (dx / len) * 8.0 * blockLength();
-            double runUR = priestUR + (dy / len) * 8.0 * blockLength();
-            //边界限制
-            double maxCoord = 100.0 * blockLength();
-            if (runDR < 0) runDR = 0.0;
-            if (runUR < 0) runUR = 0.0;
-            if (runDR > maxCoord) runDR = maxCoord;
-            if (runUR > maxCoord) runUR = maxCoord;
-            if (canOrder(priestSN, 15)) {
-                HumanMove(priestSN, runDR, runUR);
+    //分级响应:
+    //16格内=预警,先往安全点靠(还没被打,提前动起来)
+    //12格内=危险,紧急逃跑(远离敌人+朝向安全点)
+    //逃跑方向:远离所有敌人的威胁中心 + 朝向安全点(箭塔/市镇中心),两个方向合成,
+    //这样既拉开距离又不会跑散,始终往有保护的地方靠
+    const double warnDist = 16.0;
+    const double dangerDist = 12.0;
+    if (enemySN >= 0 && enemyDist <= warnDist) {
+        if (enemyDist > dangerDist) {
+            //12~16格:预警,往安全点靠,10帧改一次方向
+            if (canOrder(priestSN, 10)) {
+                HumanMove(priestSN, detailOf(safeX), detailOf(safeY));
                 rememberOrder(priestSN);
             }
+            return;
+        }
+        //12格内:危险,紧急逃跑
+        //计算威胁中心:所有14格内敌人的加权平均位置(越近权重越大),
+        //不是只看最近的一个,免得被侧面绕过来的敌人包抄
+        double threatDR = 0.0;
+        double threatUR = 0.0;
+        double weightSum = 0.0;
+        for (unsigned int i = 0; i < info.enemy_armies.size(); i++) {
+            double d = distanceBlock(priestX, priestY, info.enemy_armies[i].BlockDR, info.enemy_armies[i].BlockUR);
+            if (d <= dangerDist) {
+                double w = 1.0 / (d + 1.0);
+                threatDR += info.enemy_armies[i].DR * w;
+                threatUR += info.enemy_armies[i].UR * w;
+                weightSum += w;
+            }
+        }
+        for (unsigned int i = 0; i < info.enemy_farmers.size(); i++) {
+            double d = distanceBlock(priestX, priestY, info.enemy_farmers[i].BlockDR, info.enemy_farmers[i].BlockUR);
+            if (d <= dangerDist) {
+                double w = 1.0 / (d + 1.0);
+                threatDR += info.enemy_farmers[i].DR * w;
+                threatUR += info.enemy_farmers[i].UR * w;
+                weightSum += w;
+            }
+        }
+        if (weightSum > 0.001) {
+            threatDR /= weightSum;
+            threatUR /= weightSum;
+        } else {
+            threatDR = enemyDR;
+            threatUR = enemyUR;
+        }
+
+        //远离威胁中心的方向(归一化)
+        double awayX = priestDR - threatDR;
+        double awayY = priestUR - threatUR;
+        double awayLen = sqrt(awayX * awayX + awayY * awayY);
+        if (awayLen > 0.001) {
+            awayX /= awayLen;
+            awayY /= awayLen;
+        }
+
+        //朝向安全点的方向(归一化)
+        double safeDR = detailOf(safeX);
+        double safeUR = detailOf(safeY);
+        double toSafeX = safeDR - priestDR;
+        double toSafeY = safeUR - priestUR;
+        double toSafeLen = sqrt(toSafeX * toSafeX + toSafeY * toSafeY);
+        if (toSafeLen > 0.001) {
+            toSafeX /= toSafeLen;
+            toSafeY /= toSafeLen;
+        }
+
+        //合成最终逃跑方向:远离敌人占6成,朝安全点占4成(先保命再靠塔)
+        double runDirX = awayX * 0.6 + toSafeX * 0.4;
+        double runDirY = awayY * 0.6 + toSafeY * 0.4;
+        double runDirLen = sqrt(runDirX * runDirX + runDirY * runDirY);
+        if (runDirLen > 0.001) {
+            runDirX /= runDirLen;
+            runDirY /= runDirLen;
+        }
+
+        //逃跑距离:敌人越近跑越远,最远10格,最近6格
+        double runDist = 6.0 + (dangerDist - enemyDist) / dangerDist * 4.0;
+        double runDR = priestDR + runDirX * runDist * blockLength();
+        double runUR = priestUR + runDirY * runDist * blockLength();
+
+        //边界限制
+        double maxCoord = 100.0 * blockLength();
+        if (runDR < 0) runDR = 0.0;
+        if (runUR < 0) runUR = 0.0;
+        if (runDR > maxCoord) runDR = maxCoord;
+        if (runUR > maxCoord) runUR = maxCoord;
+
+        if (canOrder(priestSN, 5)) {
+            HumanMove(priestSN, runDR, runUR);
+            rememberOrder(priestSN);
         }
         return;
     }
@@ -2126,23 +2247,92 @@ void UsrAI::attackEnemyBase(const tagInfo& info)
         if (info.armies[i].SN != priestSN) {
             continue;
         }
+        //受击检测:血量下降立刻往武器工程厂方向跑(那边有我方军队保护),3帧节流
+        if (priestLastBlood >= 0 && info.armies[i].Blood < priestLastBlood) {
+            if (canOrder(priestSN, 3)) {
+                HumanMove(priestSN, detailOf(siegeX), detailOf(siegeY));
+                rememberOrder(priestSN);
+            }
+            priestLastBlood = info.armies[i].Blood;
+            break;
+        }
+        priestLastBlood = info.armies[i].Blood;
+
         if (enemySN >= 0 && enemyDist <= 15.0) {
-            //有敌人靠近,祭司先躲远一点(往远离敌人的方向跑),别被打死了
-            if (info.armies[i].NowState == HUMAN_STATE_IDLE && canOrder(priestSN, 40)) {
-                double dx = priestDR - enemyDR;
-                double dy = priestUR - enemyUR;
-                double len = sqrt(dx * dx + dy * dy);
-                if (len > 0.001) {
-                    double runDR = priestDR + (dx / len) * 6.0 * blockLength();
-                    double runUR = priestUR + (dy / len) * 6.0 * blockLength();
-                    double maxCoord = 100.0 * blockLength();
-                    if (runDR < 0) runDR = 0.0;
-                    if (runUR < 0) runUR = 0.0;
-                    if (runDR > maxCoord) runDR = maxCoord;
-                    if (runUR > maxCoord) runUR = maxCoord;
-                    HumanMove(priestSN, runDR, runUR);
-                    rememberOrder(priestSN);
+            //有敌人靠近,祭司先躲
+            //逃跑方向:远离敌人威胁中心 + 朝向武器工程厂(那边有我方军队保护),
+            //不检查NowState,正在走也要立刻改方向跑,不然会被追上
+            if (canOrder(priestSN, 8)) {
+                //计算威胁中心:所有15格内敌人的加权平均位置(越近权重越大)
+                double threatDR = 0.0;
+                double threatUR = 0.0;
+                double weightSum = 0.0;
+                for (unsigned int j = 0; j < info.enemy_armies.size(); j++) {
+                    double d = distanceBlock(priestX, priestY, info.enemy_armies[j].BlockDR, info.enemy_armies[j].BlockUR);
+                    if (d <= 15.0) {
+                        double w = 1.0 / (d + 1.0);
+                        threatDR += info.enemy_armies[j].DR * w;
+                        threatUR += info.enemy_armies[j].UR * w;
+                        weightSum += w;
+                    }
                 }
+                for (unsigned int j = 0; j < info.enemy_farmers.size(); j++) {
+                    double d = distanceBlock(priestX, priestY, info.enemy_farmers[j].BlockDR, info.enemy_farmers[j].BlockUR);
+                    if (d <= 15.0) {
+                        double w = 1.0 / (d + 1.0);
+                        threatDR += info.enemy_farmers[j].DR * w;
+                        threatUR += info.enemy_farmers[j].UR * w;
+                        weightSum += w;
+                    }
+                }
+                if (weightSum > 0.001) {
+                    threatDR /= weightSum;
+                    threatUR /= weightSum;
+                } else {
+                    threatDR = enemyDR;
+                    threatUR = enemyUR;
+                }
+
+                //远离威胁中心的方向(归一化)
+                double awayX = priestDR - threatDR;
+                double awayY = priestUR - threatUR;
+                double awayLen = sqrt(awayX * awayX + awayY * awayY);
+                if (awayLen > 0.001) {
+                    awayX /= awayLen;
+                    awayY /= awayLen;
+                }
+
+                //朝向武器工程厂的方向(归一化,那边有我方军队在打,靠过去就有保护)
+                double siegeDR = detailOf(siegeX);
+                double siegeUR = detailOf(siegeY);
+                double toSiegeX = siegeDR - priestDR;
+                double toSiegeY = siegeUR - priestUR;
+                double toSiegeLen = sqrt(toSiegeX * toSiegeX + toSiegeY * toSiegeY);
+                if (toSiegeLen > 0.001) {
+                    toSiegeX /= toSiegeLen;
+                    toSiegeY /= toSiegeLen;
+                }
+
+                //合成最终逃跑方向:远离敌人占6成,朝工厂占4成(先保命再靠过去)
+                double runDirX = awayX * 0.6 + toSiegeX * 0.4;
+                double runDirY = awayY * 0.6 + toSiegeY * 0.4;
+                double runDirLen = sqrt(runDirX * runDirX + runDirY * runDirY);
+                if (runDirLen > 0.001) {
+                    runDirX /= runDirLen;
+                    runDirY /= runDirLen;
+                }
+
+                //逃跑距离:敌人越近跑越远,最远8格,最近5格
+                double runDist = 5.0 + (15.0 - enemyDist) / 15.0 * 3.0;
+                double runDR = priestDR + runDirX * runDist * blockLength();
+                double runUR = priestUR + runDirY * runDist * blockLength();
+                double maxCoord = 100.0 * blockLength();
+                if (runDR < 0) runDR = 0.0;
+                if (runUR < 0) runUR = 0.0;
+                if (runDR > maxCoord) runDR = maxCoord;
+                if (runUR > maxCoord) runUR = maxCoord;
+                HumanMove(priestSN, runDR, runUR);
+                rememberOrder(priestSN);
             }
         } else {
             //没有敌人靠近,让祭司去找武器工程厂转化(转化成功就赢了)
