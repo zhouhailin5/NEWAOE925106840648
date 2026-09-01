@@ -42,6 +42,12 @@ private:
     //把地图信息更新到数组里,方便找空地建房子
     void updateMapInfo(const tagInfo& info);
 
+    // 保护祭司：使其移动到己方箭塔附近
+    void protectPriest(const tagInfo& info);
+
+    // 在初始箭塔周围额外建造箭塔
+    void buildExtraTowers(const tagInfo& info);
+
     //给空闲的村民分配工作(砍树、采浆果、挖石头等)
     void assignWork(const tagInfo& info);
 
@@ -65,6 +71,9 @@ private:
 
     //指挥军队攻击看到的敌人
     void armyFight(const tagInfo& info);
+
+    //箭塔自动攻击射程内的敌人
+    void towerFight(const tagInfo& info);
 
     //防守波次攻击:村民受伤就躲回家里
     void defendBase(const tagInfo& info);

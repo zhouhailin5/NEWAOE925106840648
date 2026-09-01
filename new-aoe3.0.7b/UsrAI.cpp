@@ -697,6 +697,85 @@ void UsrAI::buildSomeBuilding(const tagInfo& info, int buildingType)
 }
 
 /* =====================================================================
+ *  在已有箭塔周围额外建造箭塔（增强防守）
+ * ===================================================================== */
+void UsrAI::buildExtraTowers(const tagInfo& info)
+{
+    // 必须已解锁箭塔科技
+    if (!hasArrowTech) {
+        return;
+    }
+
+    // 统计当前已建成的箭塔数量，并记录第一个箭塔坐标作为参考
+    int towerCount = 0;
+    int refX = -1, refY = -1;
+    for (const auto& b : info.buildings) {
+        if (b.Type == BUILDING_ARROWTOWER && b.Percent >= 100) {
+            towerCount++;
+            if (refX == -1) {
+                refX = b.BlockDR;
+                refY = b.BlockUR;
+            }
+        }
+    }
+
+    // 目标数量：初始1个 + 额外2个 = 3个（可自行调整）
+    const int TARGET_TOWERS = 3;
+    if (towerCount >= TARGET_TOWERS) {
+        return;
+    }
+
+    // 检查石头是否足够（建造一个箭塔需要150石头）
+    if (info.Stone < 150) {
+        return;
+    }
+
+    // 找一个空闲的陆地村民
+    int workerSN = -1;
+    for (const auto& farmer : info.farmers) {
+        if (farmer.FarmerSort != FARMERTYPE_FARMER) continue;
+        if (farmer.NowState == HUMAN_STATE_IDLE) {
+            workerSN = farmer.SN;
+            break;
+        }
+    }
+    if (workerSN < 0) {
+        return;   // 没有空闲村民
+    }
+
+    // 确定参考中心：若已有箭塔，用箭塔坐标；否则用市镇中心
+    int centerX = (refX >= 0) ? refX : townX;
+    int centerY = (refY >= 0) ? refY : townY;
+    if (centerX < 0 || centerY < 0) {
+        return;   // 连市镇中心都未找到，放弃
+    }
+
+    // 在参考点附近寻找2x2空地（略偏移避免与原箭塔重叠）
+    int bx = 0, by = 0;
+    // 先尝试以参考点偏移（如向右下偏移2格）为中心寻找
+    int offsetX = centerX + 3;
+    int offsetY = centerY + 3;
+    if (!findBuildPlace(info, bx, by, 2, offsetX, offsetY)) {
+        // 若找不到，再尝试以参考点本身为中心（但可能会因为重叠失败）
+        if (!findBuildPlace(info, bx, by, 2, centerX, centerY)) {
+            return;   // 实在找不到空地
+        }
+    }
+
+    // 检查村民是否可下令（控制频率）
+    if (!canOrder(workerSN, 15)) {
+        return;
+    }
+
+    // 下达建造指令
+    HumanBuild(workerSN, BUILDING_ARROWTOWER, bx, by);
+    rememberOrder(workerSN);
+
+    // 可选：将此村民标记为建造状态（但已有WORK_BUILD全局标记，可复用）
+    // 由于建造完成后会自动转为空闲，我们不需要额外处理
+}
+
+/* =====================================================================
  *  研究科技
  * ===================================================================== */
 void UsrAI::researchTech(const tagInfo& info)
@@ -1147,6 +1226,82 @@ void UsrAI::armyFight(const tagInfo& info)
 }
 
 /* =====================================================================
+ *  箭塔自动攻击射程内的敌人
+ *  说明:箭塔不会自己打人,要AI用HumanAction给它下攻击指令。
+ *      每次只看射程内(DIS_ARROWTOWER格)的敌人,避免箭塔干等。
+ * ===================================================================== */
+void UsrAI::towerFight(const tagInfo& info)
+{
+    //箭塔的攻击距离(单位:格,和游戏里箭塔的射程一样)
+    const double towerRange = double(DIS_ARROWTOWER);
+
+    //挨个看每座箭塔
+    for (unsigned int i = 0; i < info.buildings.size(); i++) {
+        const tagBuilding& building = info.buildings[i];
+        //只看已经建好的箭塔
+        if (building.Type != BUILDING_ARROWTOWER) {
+            continue;
+        }
+        if (building.Percent < 100) {
+            continue;
+        }
+        //Project是箭塔当前攻击目标的编号,不是-1就说明它已经在打谁了
+        if (building.Project >= 0) {
+            continue;
+        }
+        //别每帧都下指令
+        if (!canOrder(building.SN, 10)) {
+            continue;
+        }
+
+        //箭塔中心的位置(箭塔是2*2的,中心在(BlockDR+1,BlockUR+1)这块)
+        double towerDR = (building.BlockDR + 1) * blockLength();
+        double towerUR = (building.BlockUR + 1) * blockLength();
+
+        //找射程内最近的敌人:先军队,再农民,最后建筑(只挑射程内的,免得箭塔干等)
+        const double rangeLimit = towerRange * blockLength();
+        int targetSN = -1;
+        double bestDistance = 99999999.0;
+
+        //敌人的军队(有细节坐标,直接算准确距离)
+        for (unsigned int j = 0; j < info.enemy_armies.size(); j++) {
+            double d = fabs(towerDR - info.enemy_armies[j].DR) + fabs(towerUR - info.enemy_armies[j].UR);
+            if (d <= rangeLimit && d < bestDistance) {
+                bestDistance = d;
+                targetSN = info.enemy_armies[j].SN;
+            }
+        }
+        //敌人的农民
+        for (unsigned int j = 0; j < info.enemy_farmers.size(); j++) {
+            double d = fabs(towerDR - info.enemy_farmers[j].DR) + fabs(towerUR - info.enemy_farmers[j].UR);
+            if (d <= rangeLimit && d < bestDistance) {
+                bestDistance = d;
+                targetSN = info.enemy_farmers[j].SN;
+            }
+        }
+        //军队和农民都没进射程,再考虑打敌人的建筑(建筑只有块坐标,按3*3建筑的中心估算)
+        if (targetSN < 0) {
+            for (unsigned int j = 0; j < info.enemy_buildings.size(); j++) {
+                double d = fabs(towerDR - (info.enemy_buildings[j].BlockDR + 1.5) * blockLength())
+                         + fabs(towerUR - (info.enemy_buildings[j].BlockUR + 1.5) * blockLength());
+                if (d <= rangeLimit && d < bestDistance) {
+                    bestDistance = d;
+                    targetSN = info.enemy_buildings[j].SN;
+                }
+            }
+        }
+        //射程内一个敌人都没有,这帧就算了(敌人走进射程会自动再选)
+        if (targetSN < 0) {
+            continue;
+        }
+
+        //下指令让箭塔攻击
+        HumanAction(building.SN, targetSN);
+        rememberOrder(building.SN);
+    }
+}
+
+/* =====================================================================
  *  防守波次攻击
  * ===================================================================== */
 void UsrAI::defendBase(const tagInfo& info)
@@ -1291,6 +1446,64 @@ void UsrAI::exploreMap(const tagInfo& info)
         break;
     }
 }
+
+
+/* =====================================================================
+ *  保护祭司：在反攻阶段前，将其移动到己方箭塔旁边
+ * ===================================================================== */
+void UsrAI::protectPriest(const tagInfo& info)
+{
+    // 只在反攻阶段之前保护
+    if (gameStage >= 2) {
+        return;
+    }
+
+    // 寻找己方已建成的箭塔
+    int towerSN = findBuilding(info, BUILDING_ARROWTOWER);
+    if (towerSN < 0) {
+        return;   // 没有箭塔，无法保护
+    }
+
+    // 获取箭塔的块坐标
+    int towerX = -1, towerY = -1;
+    for (const auto& building : info.buildings) {
+        if (building.SN == towerSN) {
+            towerX = building.BlockDR;
+            towerY = building.BlockUR;
+            break;
+        }
+    }
+    if (towerX < 0 || towerY < 0) {
+        return;
+    }
+
+    // 寻找己方祭司
+    for (const auto& army : info.armies) {
+        if (army.Sort == AT_PRIEST) {
+            int priestSN = army.SN;
+
+            // 计算祭司与箭塔的距离（块坐标）
+            double dist = distanceBlock(army.BlockDR, army.BlockUR, towerX, towerY);
+            if (dist > 2.5) {   // 若祭司离箭塔较远
+                if (canOrder(priestSN, 30)) {   // 控制指令频率
+                    // 目标位置：箭塔旁边的格子（偏移1格，确保不越界）
+                    int targetX = towerX + 1;
+                    int targetY = towerY + 1;
+                    // 简单边界限制
+                    if (targetX < 0) targetX = towerX - 1;
+                    if (targetY < 0) targetY = towerY - 1;
+                    if (targetX >= 100) targetX = towerX - 1;
+                    if (targetY >= 100) targetY = towerY - 1;
+
+                    HumanMove(priestSN, detailOf(targetX), detailOf(targetY));
+                    rememberOrder(priestSN);
+                }
+            }
+            break;   // 只处理第一个祭司（一般只有一个）
+        }
+    }
+}
+
 
 /* =====================================================================
  *  反攻:派军队去敌方基地,最后用祭司转化武器工程厂
@@ -1496,6 +1709,9 @@ void UsrAI::strategyMain(const tagInfo& info)
     //更新地图信息
     updateMapInfo(info);
 
+    protectPriest(info); // 保护祭司
+
+
     //判断阶段:升到铜器时代就进入阶段1
     if (gameStage == 0 && info.civilizationStage == CIVILIZATION_BRONZEAGE) {
         gameStage = 1;
@@ -1510,6 +1726,7 @@ void UsrAI::strategyMain(const tagInfo& info)
     upgradeAge(info);        //升级时代
     researchTech(info);      //研究科技
     buildHouse(info);        //盖房子
+    buildExtraTowers(info);   // 额外建造箭塔（在科技解锁后）
     buildSomeBuilding(info, BUILDING_MARKET);      //盖市场
     buildSomeBuilding(info, BUILDING_ARMYCAMP);    //盖兵营
     buildSomeBuilding(info, BUILDING_RANGE);       //盖靶场
@@ -1524,6 +1741,7 @@ void UsrAI::strategyMain(const tagInfo& info)
     exploreMap(info);        //探路
     makeArmy(info);          //造士兵
     armyFight(info);         //军队打架
+    towerFight(info);        //箭塔自动攻击射程内的敌人
     defendBase(info);        //防守
     if (gameStage == 2) {
         attackEnemyBase(info);   //反攻
