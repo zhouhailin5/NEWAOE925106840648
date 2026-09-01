@@ -220,7 +220,7 @@ bool UsrAI::canBuildHere(const tagInfo& info, int x, int y, int size)
             }
         }
     }
-    //检查这个位置有没有被别的建筑占着
+    //检查这个位置有没有被别的建筑占着,同时要求建筑之间至少留1格通道(不然单位会被卡住)
     for (unsigned int i = 0; i < info.buildings.size(); i++) {
         int bX = info.buildings[i].BlockDR;
         int bY = info.buildings[i].BlockUR;
@@ -228,12 +228,16 @@ bool UsrAI::canBuildHere(const tagInfo& info, int x, int y, int size)
         if (info.buildings[i].Type == BUILDING_HOME || info.buildings[i].Type == BUILDING_ARROWTOWER) {
             bSize = 2;    //房子和箭塔是2*2的
         }
-        //判断两个方块有没有重叠
-        if (bX < x + size && bX + bSize > x && bY < y + size && bY + bSize > y) {
+        //把对方建筑的范围往外扩1格(周围留1格通道),再判断和目标建筑有没有重叠
+        int bx1 = bX - 1;
+        int by1 = bY - 1;
+        int bx2 = bX + bSize + 1;
+        int by2 = bY + bSize + 1;
+        if (bx1 < x + size && bx2 > x && by1 < y + size && by2 > y) {
             return false;
         }
     }
-    //检查有没有被敌人的建筑占着
+    //检查有没有被敌人的建筑占着(同样留1格通道)
     for (unsigned int i = 0; i < info.enemy_buildings.size(); i++) {
         int bX = info.enemy_buildings[i].BlockDR;
         int bY = info.enemy_buildings[i].BlockUR;
@@ -241,7 +245,11 @@ bool UsrAI::canBuildHere(const tagInfo& info, int x, int y, int size)
         if (info.enemy_buildings[i].Type == BUILDING_HOME || info.enemy_buildings[i].Type == BUILDING_ARROWTOWER) {
             bSize = 2;
         }
-        if (bX < x + size && bX + bSize > x && bY < y + size && bY + bSize > y) {
+        int bx1 = bX - 1;
+        int by1 = bY - 1;
+        int bx2 = bX + bSize + 1;
+        int by2 = bY + bSize + 1;
+        if (bx1 < x + size && bx2 > x && by1 < y + size && by2 > y) {
             return false;
         }
     }
@@ -284,8 +292,8 @@ bool UsrAI::canBuildHere(const tagInfo& info, int x, int y, int size)
 //找到就把坐标写到x和y里,返回true
 bool UsrAI::findBuildPlace(const tagInfo& info, int& x, int& y, int size, int centerX, int centerY)
 {
-    //从半径3开始找,找到半径18,一圈一圈找
-    for (int r = 3; r <= 18; r++) {
+    //从半径4开始找,找到半径18,一圈一圈找(离市镇中心太近会被建筑围死)
+    for (int r = 4; r <= 18; r++) {
         //先找上面那条边
         for (int dx = -r; dx <= r; dx++) {
             if (canBuildHere(info, centerX + dx, centerY - r, size)) {
@@ -862,8 +870,8 @@ void UsrAI::buildExtraTowers(const tagInfo& info)
         }
     }
 
-    // 目标数量：4个（初始1个 + 额外3个），箭塔多了守家才稳
-    const int TARGET_TOWERS = 4;
+    // 目标数量：3个（初始1个 + 额外2个），太多会挤在一起把单位卡住
+    const int TARGET_TOWERS = 3;
     if (towerCount >= TARGET_TOWERS) {
         return;
     }
