@@ -42,8 +42,8 @@ private:
     //把地图信息更新到数组里,方便找空地建房子
     void updateMapInfo(const tagInfo& info);
 
-    // 保护祭司：使其移动到己方箭塔附近
-    void protectPriest(const tagInfo& info);
+    // 祭司智能行为（融合初始移动和动态逃跑/回塔）
+    void priestBehavior(const tagInfo& info);
 
     // 在初始箭塔周围额外建造箭塔
     void buildExtraTowers(const tagInfo& info);
@@ -56,6 +56,9 @@ private:
 
     //派一个村民去盖其他建筑(市场、兵营、靶场、马厩、箭塔、学院等)
     void buildSomeBuilding(const tagInfo& info, int buildingType);
+
+    //派一个村民去盖农田(食物稳定,不然后期没东西吃)
+    void buildFarm(const tagInfo& info);
 
     //研究各种科技
     void researchTech(const tagInfo& info);
@@ -85,6 +88,12 @@ private:
     void exploreMap(const tagInfo& info);
 
     /* ================== 下面是一些辅助函数 ================== */
+
+    //找祭司的编号和位置(找不到返回false)
+    bool findPriest(const tagInfo& info, int& sn, int& bx, int& by, double& dr, double& ur);
+
+    //找祭司的安全点:有箭塔去箭塔旁,没有就去市镇中心旁(找不到返回false)
+    bool findPriestSafeSpot(const tagInfo& info, int& x, int& y);
 
     //找到距离(x,y)最近的某种资源的SN,找不到返回-1
     int findResource(const tagInfo& info, int resType, int x, int y);
