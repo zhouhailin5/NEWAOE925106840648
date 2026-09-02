@@ -45,6 +45,9 @@ private:
     // 祭司智能行为（融合初始移动和动态逃跑/回塔）
     void priestBehavior(const tagInfo& info);
 
+    // 祭司开局探路:第一波到来前,以之字形向地图中部探索
+    void priestExplore(const tagInfo& info);
+
     // 在初始箭塔周围额外建造箭塔
     void buildExtraTowers(const tagInfo& info);
 
@@ -124,9 +127,6 @@ private:
 
     //返回一格的长度
     double blockLength();
-
-    //把细节坐标转成块坐标
-    int blockOf(double detail);
 
     //把块坐标转成细节坐标(取格子的中心点)
     double detailOf(int block);
