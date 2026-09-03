@@ -81,15 +81,6 @@ private:
     //箭塔自动攻击射程内的敌人
     void towerFight(const tagInfo& info);
 
-    //防守波次攻击:村民受伤就躲回家里
-    void defendBase(const tagInfo& info);
-
-    //反攻:派军队去敌方基地,最后让祭司转化武器工程厂
-    void attackEnemyBase(const tagInfo& info);
-
-    //派一个村民去探路,找金矿和敌方基地
-    void exploreMap(const tagInfo& info);
-
     /* ================== 下面是一些辅助函数 ================== */
 
     //找祭司的编号和位置(找不到返回false)

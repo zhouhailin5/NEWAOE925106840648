@@ -40,7 +40,6 @@ ins UsrIns;
 #define WORK_GOLD    5   //挖金矿
 #define WORK_FARM    6   //种田
 #define WORK_BUILD   7   //盖房子(专门派一个村民盖房子)
-#define WORK_EXPLORE 8   //探路
 
 //第一波攻击在6000帧左右到来,这里定义"第一波即将到来"的时间点:
 //5600帧后停止祭司探路,回安全点,交给保护代码接管(留400帧回程余量)
@@ -50,9 +49,6 @@ ins UsrIns;
 static int gameStage = 1;                 //当前游戏阶段,1游戏开始探路采集,2防御第一波升级铜器,3防御第二三波造兵,4反攻
 static int townX = -1;                    //市镇中心的块坐标X
 static int townY = -1;                    //市镇中心的块坐标Y
-static int waveFlag = 0;                  //当前打到第几波(0还没打,1第一波,2第二波,3第三波)
-static int enemyBaseX = -1;               //敌方基地的块坐标X(探出来之后才知道)
-static int enemyBaseY = -1;               //敌方基地的块坐标Y
 
 //用来记录村民现在在干什么活的表
 static map<int,int> villagerWork;         //村民编号 -> 工种
@@ -72,10 +68,6 @@ static bool hasBroadTech = false;         //兵营的阔剑科技
 static bool hasCompositeTech = false;     //靶场的复合弓科技
 static bool hasAgeUp = false;             //是否已经让市镇中心升级时代了
 
-//探路用的
-static int exploreSN = -1;                //派出去探路的村民编号
-static int exploreIndex = 0;              //探路方向轮换用的
-static int scanIndex = 0;                 //反攻时侦察兵方向轮换用的
 static int priestLastBlood = -1;          //祭司上一帧血量,受击立刻逃跑用
 
 //祭司开局探路用的状态(探路阶段由priestExplore独占管理)
@@ -503,13 +495,13 @@ void UsrAI::assignWork(const tagInfo& info)
         if (!isIdle) {
             continue;
         }
-        //盖房子的人由盖房子的函数管,探路的人由探路的函数管,这里都不管
+        //盖房子的人由盖房子的函数管,这里不管
         map<int,int>::iterator workIt = villagerWork.find(farmer.SN);
         int nowWork = WORK_NONE;
         if (workIt != villagerWork.end()) {
             nowWork = workIt->second;
         }
-        if (nowWork == WORK_BUILD || nowWork == WORK_EXPLORE) {
+        if (nowWork == WORK_BUILD) {
             continue;
         }
         //别每帧都给他下指令,隔几帧再下
@@ -1383,11 +1375,11 @@ void UsrAI::makeArmy(const tagInfo& info)
  *  说明:敌方波次会专门来杀祭司,所以军队就守在祭司旁边——
  *      敌人想杀祭司就必须先打穿我们的军队。没有敌人时全员在
  *      "祭司与敌人之间"的集结点待命,有敌人时全军集火最近的敌人。
- *      反攻阶段交给attackEnemyBase指挥。
+ *      反攻阶段(阶段4)暂未实现,后续再补。
  * ===================================================================== */
 void UsrAI::armyFight(const tagInfo& info)
 {
-    //反攻阶段(阶段4)不管防守,统一由attackEnemyBase带队
+    //反攻阶段(阶段4)暂未实现,当前只负责防守布防
     if (gameStage == 4) {
         return;
     }
@@ -1410,19 +1402,6 @@ void UsrAI::armyFight(const tagInfo& info)
     }
     int rallyX = safeX + 2;
     int rallyY = safeY + 2;
-    if (enemyBaseX >= 0) {
-        //知道敌方基地在哪了,就往敌人那个方向偏,军队挡在祭司和敌人中间
-        if (enemyBaseX > safeX) {
-            rallyX = safeX + 2;
-        } else {
-            rallyX = safeX - 2;
-        }
-        if (enemyBaseY > safeY) {
-            rallyY = safeY + 2;
-        } else {
-            rallyY = safeY - 2;
-        }
-    }
     if (rallyX < 1) rallyX = 1;
     if (rallyY < 1) rallyY = 1;
     if (rallyX > 98) rallyX = 98;
@@ -1581,256 +1560,6 @@ void UsrAI::towerFight(const tagInfo& info)
 }
 
 /* =====================================================================
- *  防守波次攻击
- *  说明:敌人的波次会专门盯着农民杀(杀够一定数量就撤),所以只要有
- *      敌人摸到基地附近,就把所有村民撤到市镇中心后面躲起来,
- *      让箭塔和士兵去挡。农民活着,经济才不会崩。
- * ===================================================================== */
-void UsrAI::defendBase(const tagInfo& info)
-{
-    //判断现在打到第几波了(游戏时间,一秒钟25帧)
-    if (waveFlag < 1 && info.GameFrame >= 6000) {
-        waveFlag = 1;    //第一波来了,大概4分钟的时候
-    }
-    if (waveFlag < 2 && info.GameFrame >= 13500) {
-        waveFlag = 2;    //第二波来了,大概9分钟的时候
-    }
-    if (waveFlag < 3 && info.GameFrame >= 21000) {
-        waveFlag = 3;    //第三波来了,大概14分钟的时候
-    }
-
-    //看看有没有敌人摸到基地附近(以市镇中心为圆心),同时记录最近敌人的位置
-    bool enemyNearBase = false;
-    int nearestEnemyX = -1;
-    int nearestEnemyY = -1;
-    double nearestEnemyDist = 999999.0;
-    for (unsigned int i = 0; i < info.enemy_armies.size(); i++) {
-        double d = distanceBlock(info.enemy_armies[i].BlockDR, info.enemy_armies[i].BlockUR, townX, townY);
-        if (d <= 14.0) {
-            enemyNearBase = true;
-            if (d < nearestEnemyDist) {
-                nearestEnemyDist = d;
-                nearestEnemyX = info.enemy_armies[i].BlockDR;
-                nearestEnemyY = info.enemy_armies[i].BlockUR;
-            }
-        }
-    }
-    for (unsigned int i = 0; i < info.enemy_farmers.size(); i++) {
-        double d = distanceBlock(info.enemy_farmers[i].BlockDR, info.enemy_farmers[i].BlockUR, townX, townY);
-        if (d <= 14.0) {
-            enemyNearBase = true;
-            if (d < nearestEnemyDist) {
-                nearestEnemyDist = d;
-                nearestEnemyX = info.enemy_farmers[i].BlockDR;
-                nearestEnemyY = info.enemy_farmers[i].BlockUR;
-            }
-        }
-    }
-    if (!enemyNearBase) {
-        return;    //基地附近没有敌人,村民安心干活
-    }
-
-    //有敌人靠近:只把离敌人5格内的村民叫回家(这些村民真的有危险),
-    //离敌人远的村民继续干活,不干预(不然会被反复叫回家形成徘徊)
-    for (unsigned int i = 0; i < info.farmers.size(); i++) {
-        const tagFarmer& farmer = info.farmers[i];
-        if (farmer.FarmerSort != 0) {
-            continue;    //渔船、运输船不管
-        }
-        //只撤退离敌人5格内的村民,远的继续采集
-        if (nearestEnemyX >= 0) {
-            double distToEnemy = distanceBlock(farmer.BlockDR, farmer.BlockUR, nearestEnemyX, nearestEnemyY);
-            if (distToEnemy > 5.0) {
-                continue;
-            }
-        }
-        //已经空闲(在家待着)或者已经离市镇中心很近了,就不管
-        if (farmer.NowState == HUMAN_STATE_IDLE) {
-            continue;
-        }
-        if (distanceBlock(farmer.BlockDR, farmer.BlockUR, townX, townY) <= 3.0) {
-            continue;
-        }
-        if (canOrder(farmer.SN, 20)) {
-            HumanMove(farmer.SN, detailOf(townX + 2), detailOf(townY + 2));
-            rememberOrder(farmer.SN);
-        }
-    }
-}
-
-/* =====================================================================
- *  探路
- *  阶段1+2:派一个村民满地图找金矿(8个方向轮着走,还没铜器没有侦察骑兵)
- *  阶段3+:村民解放,改用跑得快的侦察骑兵找敌方基地
- *  另外:只要看到敌方建筑,就顺手把敌方基地的位置记下来,反攻要用
- * ===================================================================== */
-void UsrAI::exploreMap(const tagInfo& info)
-{
-    //只要看到敌方建筑,就记下敌方基地的位置(房子不算,别的建筑更靠谱)
-    if (enemyBaseX < 0) {
-        for (unsigned int i = 0; i < info.enemy_buildings.size(); i++) {
-            if (info.enemy_buildings[i].Type != BUILDING_HOME) {
-                enemyBaseX = info.enemy_buildings[i].BlockDR;
-                enemyBaseY = info.enemy_buildings[i].BlockUR;
-                break;
-            }
-        }
-    }
-
-    if (gameStage <= 2) {
-        //========== 阶段1+2(游戏开始+防御第一波):村民找金矿(还没铜器,没有侦察骑兵) ==========
-        //如果已经找到金矿了,就把他解放出来回去干活
-        int goldSN = findResource(info, RESOURCE_GOLD, townX, townY);
-        if (goldSN >= 0) {
-            if (exploreSN >= 0) {
-                map<int,int>::iterator it = villagerWork.find(exploreSN);
-                if (it != villagerWork.end()) {
-                    it->second = WORK_NONE;
-                }
-                exploreSN = -1;
-            }
-            return;
-        }
-        //找一个空闲村民去探路
-        if (exploreSN < 0) {
-            for (unsigned int i = 0; i < info.farmers.size(); i++) {
-                const tagFarmer& farmer = info.farmers[i];
-                if (farmer.FarmerSort != 0) {
-                    continue;
-                }
-                if (farmer.NowState == HUMAN_STATE_IDLE) {
-                    exploreSN = farmer.SN;
-                    villagerWork[farmer.SN] = WORK_EXPLORE;
-                    break;
-                }
-            }
-        }
-        if (exploreSN < 0) {
-            return;
-        }
-        //看看这个村民还活着吗
-        bool alive = false;
-        for (unsigned int i = 0; i < info.farmers.size(); i++) {
-            if (info.farmers[i].SN == exploreSN) {
-                alive = true;
-                break;
-            }
-        }
-        if (!alive) {
-            exploreSN = -1;
-            return;
-        }
-        //让他往远处走,8个方向轮着换(四个角+四条边的中间),把地图多扫几遍
-        for (unsigned int i = 0; i < info.farmers.size(); i++) {
-            if (info.farmers[i].SN != exploreSN) {
-                continue;
-            }
-            if (info.farmers[i].NowState != HUMAN_STATE_IDLE) {
-                return;
-            }
-            if (!canOrder(exploreSN, 20)) {
-                return;
-            }
-            int targetX = townX;
-            int targetY = townY;
-            if (exploreIndex == 0) {
-                targetX = 85;
-                targetY = 85;
-            } else if (exploreIndex == 1) {
-                targetX = 10;
-                targetY = 85;
-            } else if (exploreIndex == 2) {
-                targetX = 85;
-                targetY = 10;
-            } else if (exploreIndex == 3) {
-                targetX = 10;
-                targetY = 10;
-            } else if (exploreIndex == 4) {
-                targetX = 85;
-                targetY = 50;
-            } else if (exploreIndex == 5) {
-                targetX = 10;
-                targetY = 50;
-            } else if (exploreIndex == 6) {
-                targetX = 50;
-                targetY = 85;
-            } else {
-                targetX = 50;
-                targetY = 10;
-            }
-            exploreIndex++;
-            if (exploreIndex > 7) {
-                exploreIndex = 0;
-            }
-            HumanMove(exploreSN, detailOf(targetX), detailOf(targetY));
-            rememberOrder(exploreSN);
-            break;
-        }
-        return;
-    }
-
-    //========== 阶段1及以上:村民解放,改用侦察骑兵 ==========
-    if (exploreSN >= 0) {
-        //把探路的村民解放出来,让他去干活
-        map<int,int>::iterator it = villagerWork.find(exploreSN);
-        if (it != villagerWork.end()) {
-            it->second = WORK_NONE;
-        }
-        exploreSN = -1;
-    }
-    //已经知道敌方基地在哪了,不用再探
-    if (enemyBaseX >= 0) {
-        return;
-    }
-    //找一个空闲的侦察骑兵去扫图(跑得快,一会儿就能找到敌方基地)
-    int scoutSN = -1;
-    for (unsigned int i = 0; i < info.armies.size(); i++) {
-        if (info.armies[i].Sort == AT_SCOUT) {
-            scoutSN = info.armies[i].SN;
-            break;
-        }
-    }
-    if (scoutSN < 0) {
-        return;    //还没有侦察兵,等兵营造出来再说
-    }
-    for (unsigned int i = 0; i < info.armies.size(); i++) {
-        if (info.armies[i].SN != scoutSN) {
-            continue;
-        }
-        if (info.armies[i].NowState != HUMAN_STATE_IDLE) {
-            return;
-        }
-        if (!canOrder(scoutSN, 25)) {
-            return;
-        }
-        //四个角轮着去,看到敌方建筑就停了(上面已经记下基地位置)
-        int targetX = 85;
-        int targetY = 85;
-        if (scanIndex == 0) {
-            targetX = 85;
-            targetY = 20;
-        } else if (scanIndex == 1) {
-            targetX = 20;
-            targetY = 85;
-        } else if (scanIndex == 2) {
-            targetX = 85;
-            targetY = 85;
-        } else {
-            targetX = 50;
-            targetY = 50;
-        }
-        scanIndex++;
-        if (scanIndex > 3) {
-            scanIndex = 0;
-        }
-        HumanMove(scoutSN, detailOf(targetX), detailOf(targetY));
-        rememberOrder(scoutSN);
-        break;
-    }
-}
-
-
-/* =====================================================================
  *  祭司开局探路
  *  思路:第一波攻击(6000帧)到来之前,祭司不蹲在家里,而是出去探路,
  *      把地图中部的视野点亮,为后面找金矿、找敌方基地打基础。
@@ -1970,7 +1699,7 @@ void UsrAI::priestExplore(const tagInfo& info)
  * ===================================================================== */
 void UsrAI::priestBehavior(const tagInfo& info)
 {
-    //反攻阶段(阶段3)交给attackEnemyBase管
+    //反攻阶段(阶段4)暂未实现,当前只负责保祭司和治疗
     if (gameStage >= 4) {
         return;
     }
@@ -2188,310 +1917,6 @@ void UsrAI::priestBehavior(const tagInfo& info)
     }
 }
 
-
-/* =====================================================================
- *  反攻:派军队去敌方基地,最后用祭司转化武器工程厂
- * ===================================================================== */
-void UsrAI::attackEnemyBase(const tagInfo& info)
-{
-    //没到反攻阶段(阶段3)就返回
-    if (gameStage != 4) {
-        return;
-    }
-    //如果还不知道敌方基地在哪,先派侦察骑兵(或者随便一个士兵)去找
-    if (enemyBaseX < 0) {
-        int scoutSN = -1;
-        for (unsigned int i = 0; i < info.armies.size(); i++) {
-            if (info.armies[i].Sort == AT_SCOUT) {
-                scoutSN = info.armies[i].SN;
-                break;
-            }
-        }
-        if (scoutSN < 0) {
-            for (unsigned int i = 0; i < info.armies.size(); i++) {
-                if (info.armies[i].Sort != AT_PRIEST) {
-                    scoutSN = info.armies[i].SN;
-                    break;
-                }
-            }
-        }
-        if (scoutSN < 0) {
-            return;
-        }
-        //让侦察兵往地图四个方向找
-        for (unsigned int i = 0; i < info.armies.size(); i++) {
-            if (info.armies[i].SN != scoutSN) {
-                continue;
-            }
-            if (info.armies[i].NowState != HUMAN_STATE_IDLE) {
-                break;
-            }
-            if (!canOrder(scoutSN, 40)) {
-                break;
-            }
-            int targetX = 80;
-            int targetY = 80;
-            if (scanIndex == 0) {
-                targetX = 80;
-                targetY = 20;
-            } else if (scanIndex == 1) {
-                targetX = 20;
-                targetY = 80;
-            } else if (scanIndex == 2) {
-                targetX = 80;
-                targetY = 80;
-            } else {
-                targetX = 50;
-                targetY = 50;
-            }
-            scanIndex++;
-            if (scanIndex > 3) {
-                scanIndex = 0;
-            }
-            HumanMove(scoutSN, detailOf(targetX), detailOf(targetY));
-            rememberOrder(scoutSN);
-            break;
-        }
-        //看看有没有看到敌方建筑,看到了就记住敌方基地的位置
-        for (unsigned int i = 0; i < info.enemy_buildings.size(); i++) {
-            if (info.enemy_buildings[i].Type == BUILDING_SIEGE
-                || info.enemy_buildings[i].Type == BUILDING_ARROWTOWER) {
-                enemyBaseX = info.enemy_buildings[i].BlockDR;
-                enemyBaseY = info.enemy_buildings[i].BlockUR;
-                break;
-            }
-        }
-        return;
-    }
-
-    //知道敌方基地在哪了,让主力军队走过去
-    for (unsigned int i = 0; i < info.armies.size(); i++) {
-        const tagArmy& army = info.armies[i];
-        if (army.Sort == AT_PRIEST) {
-            continue;
-        }
-        //算一下离敌方基地多远
-        double dist = distanceBlock(army.BlockDR, army.BlockUR, enemyBaseX, enemyBaseY);
-        if (dist > 6) {
-            //还很远,先走过去
-            if (army.NowState == HUMAN_STATE_IDLE && canOrder(army.SN, 20)) {
-                HumanMove(army.SN, detailOf(enemyBaseX), detailOf(enemyBaseY));
-                rememberOrder(army.SN);
-            }
-        } else {
-            //已经到附近了,打看到的敌人
-            if (army.NowState == HUMAN_STATE_IDLE || army.NowState == HUMAN_STATE_WALKING) {
-                if (canOrder(army.SN, 8)) {
-                    int enemySN = -1;
-                    double bestDistance = 99999999.0;
-                    for (unsigned int j = 0; j < info.enemy_armies.size(); j++) {
-                        double d = distanceBlock(army.BlockDR, army.BlockUR,
-                                                 info.enemy_armies[j].BlockDR, info.enemy_armies[j].BlockUR);
-                        if (d < bestDistance) {
-                            bestDistance = d;
-                            enemySN = info.enemy_armies[j].SN;
-                        }
-                    }
-                    if (enemySN < 0 && !info.enemy_buildings.empty()) {
-                        //没有敌人了就打建筑(不打武器工程厂,那个要留着转化)
-                        for (unsigned int j = 0; j < info.enemy_buildings.size(); j++) {
-                            if (info.enemy_buildings[j].Type != BUILDING_SIEGE) {
-                                enemySN = info.enemy_buildings[j].SN;
-                                break;
-                            }
-                        }
-                    }
-                    if (enemySN >= 0) {
-                        HumanAction(army.SN, enemySN);
-                        rememberOrder(army.SN);
-                    }
-                }
-            }
-        }
-    }
-
-    //找祭司,让他去转化武器工程厂
-    int priestSN = -1;
-    int priestX = 0;
-    int priestY = 0;
-    double priestDR = 0.0;
-    double priestUR = 0.0;
-    for (unsigned int i = 0; i < info.armies.size(); i++) {
-        if (info.armies[i].Sort == AT_PRIEST) {
-            priestSN = info.armies[i].SN;
-            priestX = info.armies[i].BlockDR;
-            priestY = info.armies[i].BlockUR;
-            priestDR = info.armies[i].DR;
-            priestUR = info.armies[i].UR;
-            break;
-        }
-    }
-    if (priestSN < 0) {
-        return;    //祭司没了游戏就输了,这里防御一下
-    }
-    //找敌方武器工程厂
-    int siegeSN = -1;
-    for (unsigned int i = 0; i < info.enemy_buildings.size(); i++) {
-        if (info.enemy_buildings[i].Type == BUILDING_SIEGE) {
-            siegeSN = info.enemy_buildings[i].SN;
-            break;
-        }
-    }
-    if (siegeSN < 0) {
-        return;
-    }
-    //找离祭司最近的敌人(军队优先,再看农民)
-    int enemySN = -1;
-    double enemyDist = 99999999.0;
-    double enemyDR = 0.0;
-    double enemyUR = 0.0;
-    for (unsigned int i = 0; i < info.enemy_armies.size(); i++) {
-        double d = distanceBlock(priestX, priestY, info.enemy_armies[i].BlockDR, info.enemy_armies[i].BlockUR);
-        if (d < enemyDist) {
-            enemyDist = d;
-            enemySN = info.enemy_armies[i].SN;
-            enemyDR = info.enemy_armies[i].DR;
-            enemyUR = info.enemy_armies[i].UR;
-        }
-    }
-    if (enemySN < 0) {
-        for (unsigned int i = 0; i < info.enemy_farmers.size(); i++) {
-            double d = distanceBlock(priestX, priestY, info.enemy_farmers[i].BlockDR, info.enemy_farmers[i].BlockUR);
-            if (d < enemyDist) {
-                enemyDist = d;
-                enemySN = info.enemy_farmers[i].SN;
-                enemyDR = info.enemy_farmers[i].DR;
-                enemyUR = info.enemy_farmers[i].UR;
-            }
-        }
-    }
-    //找武器工程厂的块坐标(算距离用)
-    int siegeX = 0;
-    int siegeY = 0;
-    for (unsigned int i = 0; i < info.enemy_buildings.size(); i++) {
-        if (info.enemy_buildings[i].SN == siegeSN) {
-            siegeX = info.enemy_buildings[i].BlockDR;
-            siegeY = info.enemy_buildings[i].BlockUR;
-            break;
-        }
-    }
-
-    //指挥祭司:敌人靠近就躲,没有敌人就尽快跟上去转化武器工程厂
-    for (unsigned int i = 0; i < info.armies.size(); i++) {
-        if (info.armies[i].SN != priestSN) {
-            continue;
-        }
-        //受击检测:血量下降立刻往武器工程厂方向跑(那边有我方军队保护),3帧节流
-        if (priestLastBlood >= 0 && info.armies[i].Blood < priestLastBlood) {
-            if (canOrder(priestSN, 3)) {
-                HumanMove(priestSN, detailOf(siegeX), detailOf(siegeY));
-                rememberOrder(priestSN);
-            }
-            priestLastBlood = info.armies[i].Blood;
-            break;
-        }
-        priestLastBlood = info.armies[i].Blood;
-
-        if (enemySN >= 0 && enemyDist <= 15.0) {
-            //有敌人靠近,祭司先躲
-            //逃跑方向:远离敌人威胁中心 + 朝向武器工程厂(那边有我方军队保护),
-            //不检查NowState,正在走也要立刻改方向跑,不然会被追上
-            if (canOrder(priestSN, 8)) {
-                //计算威胁中心:所有15格内敌人的加权平均位置(越近权重越大)
-                double threatDR = 0.0;
-                double threatUR = 0.0;
-                double weightSum = 0.0;
-                for (unsigned int j = 0; j < info.enemy_armies.size(); j++) {
-                    double d = distanceBlock(priestX, priestY, info.enemy_armies[j].BlockDR, info.enemy_armies[j].BlockUR);
-                    if (d <= 15.0) {
-                        double w = 1.0 / (d + 1.0);
-                        threatDR += info.enemy_armies[j].DR * w;
-                        threatUR += info.enemy_armies[j].UR * w;
-                        weightSum += w;
-                    }
-                }
-                for (unsigned int j = 0; j < info.enemy_farmers.size(); j++) {
-                    double d = distanceBlock(priestX, priestY, info.enemy_farmers[j].BlockDR, info.enemy_farmers[j].BlockUR);
-                    if (d <= 15.0) {
-                        double w = 1.0 / (d + 1.0);
-                        threatDR += info.enemy_farmers[j].DR * w;
-                        threatUR += info.enemy_farmers[j].UR * w;
-                        weightSum += w;
-                    }
-                }
-                if (weightSum > 0.001) {
-                    threatDR /= weightSum;
-                    threatUR /= weightSum;
-                } else {
-                    threatDR = enemyDR;
-                    threatUR = enemyUR;
-                }
-
-                //远离威胁中心的方向(归一化)
-                double awayX = priestDR - threatDR;
-                double awayY = priestUR - threatUR;
-                double awayLen = sqrt(awayX * awayX + awayY * awayY);
-                if (awayLen > 0.001) {
-                    awayX /= awayLen;
-                    awayY /= awayLen;
-                }
-
-                //朝向武器工程厂的方向(归一化,那边有我方军队在打,靠过去就有保护)
-                double siegeDR = detailOf(siegeX);
-                double siegeUR = detailOf(siegeY);
-                double toSiegeX = siegeDR - priestDR;
-                double toSiegeY = siegeUR - priestUR;
-                double toSiegeLen = sqrt(toSiegeX * toSiegeX + toSiegeY * toSiegeY);
-                if (toSiegeLen > 0.001) {
-                    toSiegeX /= toSiegeLen;
-                    toSiegeY /= toSiegeLen;
-                }
-
-                //合成最终逃跑方向:远离敌人占6成,朝工厂占4成(先保命再靠过去)
-                double runDirX = awayX * 0.6 + toSiegeX * 0.4;
-                double runDirY = awayY * 0.6 + toSiegeY * 0.4;
-                double runDirLen = sqrt(runDirX * runDirX + runDirY * runDirY);
-                if (runDirLen > 0.001) {
-                    runDirX /= runDirLen;
-                    runDirY /= runDirLen;
-                }
-
-                //逃跑距离:敌人越近跑越远,最远8格,最近5格
-                double runDist = 5.0 + (15.0 - enemyDist) / 15.0 * 3.0;
-                double runDR = priestDR + runDirX * runDist * blockLength();
-                double runUR = priestUR + runDirY * runDist * blockLength();
-                double maxCoord = 100.0 * blockLength();
-                if (runDR < 0) runDR = 0.0;
-                if (runUR < 0) runUR = 0.0;
-                if (runDR > maxCoord) runDR = maxCoord;
-                if (runUR > maxCoord) runUR = maxCoord;
-                HumanMove(priestSN, runDR, runUR);
-                rememberOrder(priestSN);
-            }
-        } else {
-            //没有敌人靠近,让祭司去找武器工程厂转化(转化成功就赢了)
-            if (info.armies[i].NowState == HUMAN_STATE_IDLE && canOrder(priestSN, 10)) {
-                //离工厂还远就先走过去(别掉队,免得敌人突然出现没人保护)
-                if (distanceBlock(priestX, priestY, siegeX, siegeY) > 4.0) {
-                    int goX = siegeX - 2;
-                    int goY = siegeY - 2;
-                    if (goX < 1) goX = 1;
-                    if (goY < 1) goY = 1;
-                    if (goX > 98) goX = 98;
-                    if (goY > 98) goY = 98;
-                    HumanMove(priestSN, detailOf(goX), detailOf(goY));
-                    rememberOrder(priestSN);
-                } else {
-                    //到旁边了,开始转化
-                    HumanAction(priestSN, siegeSN);
-                    rememberOrder(priestSN);
-                }
-            }
-        }
-        break;
-    }
-}
-
 /* =====================================================================
  *  每帧的主逻辑
  * ===================================================================== */
@@ -2535,10 +1960,6 @@ void UsrAI::strategyMain(const tagInfo& info)
     if (gameStage == 2 && info.civilizationStage == CIVILIZATION_BRONZEAGE) {
         gameStage = 3;    //升到铜器时代了,进入规模化造兵阶段
     }
-    //第三波打完之后(大概16分钟)开始反攻
-    if (gameStage == 3 && waveFlag >= 3 && info.GameFrame >= 24000) {
-        gameStage = 4;
-    }
 
     //按照顺序做事情(造兵永远比研究科技优先)
     makeVillager(info);      //生产村民
@@ -2559,13 +1980,8 @@ void UsrAI::strategyMain(const tagInfo& info)
         buildSomeBuilding(info, BUILDING_COLLAGE);      //铜器时代(阶段2+)盖学院
     }
     assignWork(info);        //给村民安排工作
-    exploreMap(info);        //探路
     armyFight(info);         //军队打架
     towerFight(info);        //箭塔自动攻击射程内的敌人
-    defendBase(info);        //防守
-    if (gameStage == 4) {
-        attackEnemyBase(info);   //反攻(阶段3)
-    }
 
     //如果建筑都盖完了,把专门盖房子的人解放出来
     bool needBuild = false;
