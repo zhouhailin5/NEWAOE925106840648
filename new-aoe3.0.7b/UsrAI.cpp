@@ -1,6 +1,5 @@
 #include "UsrAI.h"
 #include<set>
-#include <iostream>
 #include<unordered_map>
 #include<list>
 #include <cstdlib>
@@ -45,6 +44,9 @@ ins UsrIns;
 //5600帧后停止祭司探路,回安全点,交给保护代码接管(留400帧回程余量)
 #define PRIEST_EXPLORE_END_FRAME 5600
 
+//探路遇敌后撤帧数(25fps,75帧=3秒,足够拉开距离后切换下一目标)
+#define PRIEST_RETREAT_FRAMES 75
+
 /* ---------- 全局变量(跨帧保存的) ---------- */
 static int gameStage = 1;                 //当前游戏阶段,1游戏开始探路采集,2防御第一波升级铜器,3防御第二三波造兵,4反攻
 static int townX = -1;                    //市镇中心的块坐标X
@@ -71,13 +73,14 @@ static bool hasAgeUp = false;             //是否已经让市镇中心升级时
 static int priestLastBlood = -1;          //祭司上一帧血量,受击立刻逃跑用
 
 //祭司探路:固定四点访问(替换旧的之字形探路状态)
-static int priestVisitIndex = -1;         // 当前访问第几个目标(-1=未开始,0~4=五个目标,5=完成)
-static int priestVisitOrder[5];            // 访问顺序:存点索引(0~4),按 最近->第二近->第三近->第四近->中心点(50,50)
+static int priestVisitIndex = -1;         // 当前访问第几个目标(-1=未开始,0~3循环访问,直到探路阶段结束)
+static int priestVisitOrder[4];            // 访问顺序:存点索引(0~3角点,4=中心),第二近->第三近->最近->中心点(50,50),依次循环
 static bool priestVisitSorted = false;     // 是否已完成四点到基地的距离排序
 static int priestStillFrames = 0;          // 祭司连续静止帧数(连续10帧不变视为到达)
 static double priestLastDR = -1.0;          // 上一帧祭司细节坐标X(到达判定用,细节坐标精度高,避免块坐标粗粒度误判)
 static double priestLastUR = -1.0;          // 上一帧祭司细节坐标Y
 static bool priestMoveSent = false;         // 当前目标的移动指令是否已发送(每点只发一次)
+static int priestRetreatFrames = 0;           // 遇敌后撤剩余帧数(后撤期间不做到达判定,结束后切换下一目标)
 static int gameStartFrame = -1;             // 本局游戏开始时的GameFrame(计算相对帧号用,游戏内重启不重置GameFrame)
 
 //地图信息(0是草地,1是海洋,-1是没探索过)
@@ -1569,9 +1572,10 @@ void UsrAI::towerFight(const tagInfo& info)
  *  祭司的寻找由 findPriest 负责,第一波到来前的接管由 strategyMain 负责。
  *  本函数负责:让祭司依次访问指定探路点位。
  *  四个角点:A(12,12) B(12,88) C(88,12) D(88,88),以市镇中心为基准排序。
- *  访问顺序: 最近 -> 第二近 -> 第三近 -> 第四近(最远) -> 中心点(50,50)。
+ *  访问顺序: 第二近 -> 第三近 -> 最近 -> 中心点(50,50),四个点位依次循环直到探路阶段结束。
  *  到达判定:祭司细节坐标连续10帧保持不变。
  *  每个目标点只发送一次 HumanMove 指令。
+ *  遇敌处理:视野16格内发现敌方单位(军队/农民/建筑),用细节坐标精确检测,向安全点后撤3秒;后撤结束时若敌人仍在则继续后撤(不切换目标),敌人离开才切换下一目标。
  * ===================================================================== */
 void UsrAI::priestExplore(const tagInfo& info)
 {
@@ -1589,7 +1593,7 @@ void UsrAI::priestExplore(const tagInfo& info)
     const int px[5] = {12, 12, 88, 88, 50};
     const int py[5] = {12, 88, 12, 88, 50};
 
-    //距离排序(只做一次):只对四个角点排序,中心点固定为最后一个目标
+    //距离排序(只做一次):对四个角点按到市镇中心距离排序
     if (!priestVisitSorted) {
         double dist[4];
         int idx[4] = {0, 1, 2, 3};
@@ -1605,12 +1609,11 @@ void UsrAI::priestExplore(const tagInfo& info)
                 }
             }
         }
-        //访问顺序: 最近 -> 第二近 -> 第三近 -> 第四近(最远) -> 中心点(固定索引4)
-        priestVisitOrder[0] = idx[0];
-        priestVisitOrder[1] = idx[1];
-        priestVisitOrder[2] = idx[2];
-        priestVisitOrder[3] = idx[3];
-        priestVisitOrder[4] = 4;
+        //访问顺序: 第二近 -> 第三近 -> 最近 -> 中心点(50,50)
+        priestVisitOrder[0] = idx[1];   // 第二近
+        priestVisitOrder[1] = idx[2];   // 第三近
+        priestVisitOrder[2] = idx[0];   // 最近
+        priestVisitOrder[3] = 4;        // 中心点(50,50)
         priestVisitSorted = true;
         priestVisitIndex = 0;
         priestMoveSent = false;
@@ -1619,8 +1622,77 @@ void UsrAI::priestExplore(const tagInfo& info)
         priestLastUR = priestUR;
     }
 
-    //已完成全部五个目标点
-    if (priestVisitIndex >= 5) {
+    //后撤计时:遇敌后向安全点后撤3秒,结束后检测敌人是否还在
+    if (priestRetreatFrames > 0) {
+        priestRetreatFrames--;
+        if (priestRetreatFrames <= 0) {
+            //后撤结束:检测敌人是否仍在16格内
+            bool enemyStillThere = false;
+            const double detectDist = 16.0 * blockLength();
+            for (unsigned int i = 0; i < info.enemy_armies.size() && !enemyStillThere; i++) {
+                double dx = priestDR - info.enemy_armies[i].DR;
+                double dy = priestUR - info.enemy_armies[i].UR;
+                if (dx * dx + dy * dy <= detectDist * detectDist) enemyStillThere = true;
+            }
+            for (unsigned int i = 0; i < info.enemy_farmers.size() && !enemyStillThere; i++) {
+                double dx = priestDR - info.enemy_farmers[i].DR;
+                double dy = priestUR - info.enemy_farmers[i].UR;
+                if (dx * dx + dy * dy <= detectDist * detectDist) enemyStillThere = true;
+            }
+            for (unsigned int i = 0; i < info.enemy_buildings.size() && !enemyStillThere; i++) {
+                double bDR = detailOf(info.enemy_buildings[i].BlockDR);
+                double bUR = detailOf(info.enemy_buildings[i].BlockUR);
+                double dx = priestDR - bDR;
+                double dy = priestUR - bUR;
+                if (dx * dx + dy * dy <= detectDist * detectDist) enemyStillThere = true;
+            }
+            if (enemyStillThere) {
+                //敌人还在,继续后撤,不切换目标(不消耗目标点)
+                priestRetreatFrames = PRIEST_RETREAT_FRAMES;
+            } else {
+                //敌人走了,循环切换下一目标
+                priestVisitIndex = (priestVisitIndex + 1) % 4;
+                priestMoveSent = false;
+                priestStillFrames = 0;
+            }
+        }
+        return;    //后撤期间不做到达判定和探路移动指令
+    }
+
+    //敌人检测:视野16格内发现敌方单位(军队+农民+建筑),向安全点后撤3秒
+    //用细节坐标算距离,精度高,避免块坐标粗粒度导致延迟检测
+    bool enemyInSight = false;
+    const double detectDist = 16.0 * blockLength();   //16格对应的细节坐标距离
+    for (unsigned int i = 0; i < info.enemy_armies.size() && !enemyInSight; i++) {
+        double dx = priestDR - info.enemy_armies[i].DR;
+        double dy = priestUR - info.enemy_armies[i].UR;
+        if (dx * dx + dy * dy <= detectDist * detectDist) {
+            enemyInSight = true;
+        }
+    }
+    for (unsigned int i = 0; i < info.enemy_farmers.size() && !enemyInSight; i++) {
+        double dx = priestDR - info.enemy_farmers[i].DR;
+        double dy = priestUR - info.enemy_farmers[i].UR;
+        if (dx * dx + dy * dy <= detectDist * detectDist) {
+            enemyInSight = true;
+        }
+    }
+    for (unsigned int i = 0; i < info.enemy_buildings.size() && !enemyInSight; i++) {
+        //建筑没有细节坐标,用detailOf把块坐标转成细节坐标
+        double bDR = detailOf(info.enemy_buildings[i].BlockDR);
+        double bUR = detailOf(info.enemy_buildings[i].BlockUR);
+        double dx = priestDR - bDR;
+        double dy = priestUR - bUR;
+        if (dx * dx + dy * dy <= detectDist * detectDist) {
+            enemyInSight = true;
+        }
+    }
+    if (enemyInSight) {
+        int safeX = 0, safeY = 0;
+        if (findPriestSafeSpot(info, safeX, safeY)) {
+            HumanMove(priestSN, detailOf(safeX), detailOf(safeY));
+        }
+        priestRetreatFrames = PRIEST_RETREAT_FRAMES;
         return;
     }
 
@@ -1635,18 +1707,12 @@ void UsrAI::priestExplore(const tagInfo& info)
         priestLastUR = priestUR;
     }
 
-    //真正到达:连续10帧不动
+    //真正到达:连续10帧不动,切换下一目标
     if (priestStillFrames >= 10 && priestMoveSent) {
-        priestVisitIndex++;
+        int oldIdx = priestVisitOrder[priestVisitIndex];
+        priestVisitIndex = (priestVisitIndex + 1) % 4;   // 循环切换
         priestStillFrames = 0;
         priestMoveSent = false;
-        if (priestVisitIndex >= 5) {
-            DebugText("祭司探路:按顺序走完全部目标点,探路结束");
-            return;
-        }
-        DebugText("祭司探路:到达目标(" +
-            std::to_string(px[priestVisitOrder[priestVisitIndex - 1]]) + "," +
-            std::to_string(py[priestVisitOrder[priestVisitIndex - 1]]) + "),前往下一目标");
     }
 
     //发送当前目标的移动指令(每个点只发一次)
@@ -1657,8 +1723,6 @@ void UsrAI::priestExplore(const tagInfo& info)
         priestStillFrames = 0;
         priestLastDR = priestDR;
         priestLastUR = priestUR;
-        DebugText("祭司探路:前往目标(" +
-            std::to_string(px[tIdx]) + "," + std::to_string(py[tIdx]) + ")");
     }
 }
 
@@ -1926,6 +1990,7 @@ void UsrAI::strategyMain(const tagInfo& info)
         priestStillFrames = 0;
         priestLastDR = -1.0;
         priestLastUR = -1.0;
+        priestRetreatFrames = 0;
     }
     lastFarmerCount = currentFarmerCount;
     if (gameStartFrame < 0) {
