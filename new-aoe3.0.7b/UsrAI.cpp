@@ -466,6 +466,22 @@ void UsrAI::assignWork(const tagInfo& info)
     //砍树的人要多留几个,盖房子、盖兵营、盖箭塔、盖农田都要木头
     int wantWood = 5;
 
+    //收集已经被占用的农田(已在种田的农民的工作目标),让新分配的农民避开
+    //(文档:一块农田只能一个村民采集,多人采不增加效率)
+    set<int> occupiedFarm;
+    for (unsigned int j = 0; j < info.farmers.size(); j++) {
+        const tagFarmer& f = info.farmers[j];
+        if (f.FarmerSort != 0) {
+            continue;
+        }
+        map<int,int>::iterator wit = villagerWork.find(f.SN);
+        if (wit != villagerWork.end() && wit->second == WORK_FARM && f.WorkObjectSN > 0) {
+            occupiedFarm.insert(f.WorkObjectSN);
+        }
+    }
+    //本帧内已被分配出去的农田(避免同帧多个空闲农民选同一块)
+    set<int> farmChosenThisFrame;
+
     //挨个看每个村民,如果他是空闲的,就给他安排工作
     for (unsigned int i = 0; i < info.farmers.size(); i++) {
         const tagFarmer& farmer = info.farmers[i];
@@ -520,32 +536,35 @@ void UsrAI::assignWork(const tagInfo& info)
         //根据现在的缺人情况,决定让他干什么活
         int chooseWork = WORK_WOOD;    //默认去砍树
         if (gameStage <= 2) {
-            //阶段1+2(游戏开始+防御第一波):浆果、木头为主,石头金矿各1个,1个打猎
-            if (numBerry < 3) {
+            //阶段1+2(游戏开始+防御第一波):食物为主,金矿铜器后才需要
+            //浆果4人(食物主力)、石头1人、打猎2人一组、农田2块、砍树上限5人
+            if (numBerry < 4) {
                 chooseWork = WORK_BERRY;
             } else if (numStone < 1) {
                 chooseWork = WORK_STONE;
-            } else if (numGold < 1) {
-                chooseWork = WORK_GOLD;
-            } else if (numHunt < 1) {
+            } else if (numHunt < 2) {
                 chooseWork = WORK_HUNT;
-            } else {
-                chooseWork = WORK_WOOD;
-            }
-        } else {
-            //铜器时代:石头、金子都要多挖,种田补食物
-            if (numStone < 2) {
-                chooseWork = WORK_STONE;
-            } else if (numGold < 3) {
-                chooseWork = WORK_GOLD;
-            } else if (numHunt < 1) {
-                chooseWork = WORK_HUNT;
-            } else if (numFarm < 3) {
+            } else if (numFarm < 2) {
                 chooseWork = WORK_FARM;
             } else if (numWood < wantWood) {
                 chooseWork = WORK_WOOD;
             } else {
+                chooseWork = WORK_WOOD;    //保底砍树,不闲置
+            }
+        } else {
+            //铜器时代:金矿3人、石头2人、农田6块(与buildFarm目标一致)、打猎2人、砍树补足
+            if (numStone < 2) {
+                chooseWork = WORK_STONE;
+            } else if (numGold < 3) {
+                chooseWork = WORK_GOLD;
+            } else if (numHunt < 2) {
+                chooseWork = WORK_HUNT;
+            } else if (numFarm < 6) {
                 chooseWork = WORK_FARM;
+            } else if (numWood < wantWood) {
+                chooseWork = WORK_WOOD;
+            } else {
+                chooseWork = WORK_WOOD;    //保底砍树,不闲置
             }
         }
 
@@ -560,13 +579,26 @@ void UsrAI::assignWork(const tagInfo& info)
         } else if (chooseWork == WORK_GOLD) {
             targetSN = findResource(info, RESOURCE_GOLD, farmer.BlockDR, farmer.BlockUR);
         } else if (chooseWork == WORK_FARM) {
-            //种田:找一个还有食物的农田
+            //种田:每人一块田,避开已经被占用的农田,就近选择
+            int bestFarmSN = -1;
+            double bestFarmDist = 99999999.0;
             for (unsigned int j = 0; j < info.buildings.size(); j++) {
-                if (info.buildings[j].Type == BUILDING_FARM && info.buildings[j].Percent >= 100
-                    && info.buildings[j].Cnt > 0) {
-                    targetSN = info.buildings[j].SN;
-                    break;
+                const tagBuilding& b = info.buildings[j];
+                if (b.Type != BUILDING_FARM || b.Percent < 100 || b.Cnt <= 0) {
+                    continue;
                 }
+                if (occupiedFarm.count(b.SN) > 0 || farmChosenThisFrame.count(b.SN) > 0) {
+                    continue;    //这块田已经有人种了,换一块
+                }
+                double d = distanceBlock(farmer.BlockDR, farmer.BlockUR, b.BlockDR, b.BlockUR);
+                if (d < bestFarmDist) {
+                    bestFarmDist = d;
+                    bestFarmSN = b.SN;
+                }
+            }
+            if (bestFarmSN >= 0) {
+                targetSN = bestFarmSN;
+                farmChosenThisFrame.insert(bestFarmSN);    //本帧内不再分给其他农民
             }
         } else {
             targetSN = findResource(info, RESOURCE_TREE, farmer.BlockDR, farmer.BlockUR);
