@@ -70,10 +70,15 @@ static bool hasAgeUp = false;             //是否已经让市镇中心升级时
 
 static int priestLastBlood = -1;          //祭司上一帧血量,受击立刻逃跑用
 
-//祭司开局探路用的状态(探路阶段由priestExplore独占管理)
-static int priestTargetX = -1;            //祭司探路当前航点X(块坐标),-1表示还没设目标
-static int priestTargetY = -1;            //祭司探路当前航点Y(块坐标)
-static int priestSwingSign = 1;           //之字形摆动方向:1向左偏,-1向右偏(每段交替)
+//祭司探路:固定四点访问(替换旧的之字形探路状态)
+static int priestVisitIndex = -1;         // 当前访问第几个目标(-1=未开始,0~4=五个目标,5=完成)
+static int priestVisitOrder[5];            // 访问顺序:存点索引(0~4),按 最近->第二近->第三近->第四近->中心点(50,50)
+static bool priestVisitSorted = false;     // 是否已完成四点到基地的距离排序
+static int priestStillFrames = 0;          // 祭司连续静止帧数(连续10帧不变视为到达)
+static double priestLastDR = -1.0;          // 上一帧祭司细节坐标X(到达判定用,细节坐标精度高,避免块坐标粗粒度误判)
+static double priestLastUR = -1.0;          // 上一帧祭司细节坐标Y
+static bool priestMoveSent = false;         // 当前目标的移动指令是否已发送(每点只发一次)
+static int gameStartFrame = -1;             // 本局游戏开始时的GameFrame(计算相对帧号用,游戏内重启不重置GameFrame)
 
 //地图信息(0是草地,1是海洋,-1是没探索过)
 static int gameMap[100][100];
@@ -1561,130 +1566,99 @@ void UsrAI::towerFight(const tagInfo& info)
 
 /* =====================================================================
  *  祭司开局探路
- *  思路:第一波攻击(6000帧)到来之前,祭司不蹲在家里,而是出去探路,
- *      把地图中部的视野点亮,为后面找金矿、找敌方基地打基础。
- *      1. 探路策略:跟进祭司当前的位置,朝地图中部(50,50)方向推进,
- *         每走一段就向垂直方向左右交替摆动,走出之字形(zigzag)路径,
- *         这样一条路上能扫到更宽的范围
- *      2. 完全接管:第一波到来前,祭司的行为完全由本函数控制
- *         (strategyMain里不会调用priestBehavior)
- *      3. 第一波即将到来(5600帧):结束探路,回安全点,
- *         之后交给priestBehavior保护代码接管
- *      4. 探路途中如果祭司被打(血量下降),立刻提前回安全点,别白白送死
+ *  祭司的寻找由 findPriest 负责,第一波到来前的接管由 strategyMain 负责。
+ *  本函数负责:让祭司依次访问指定探路点位。
+ *  四个角点:A(12,12) B(12,88) C(88,12) D(88,88),以市镇中心为基准排序。
+ *  访问顺序: 最近 -> 第二近 -> 第三近 -> 第四近(最远) -> 中心点(50,50)。
+ *  到达判定:祭司细节坐标连续10帧保持不变。
+ *  每个目标点只发送一次 HumanMove 指令。
  * ===================================================================== */
 void UsrAI::priestExplore(const tagInfo& info)
 {
-    //第一波即将到来:本帧起不再接管,直接交给保护代码回安全点
-    if (info.GameFrame >= PRIEST_EXPLORE_END_FRAME) {
-        priestTargetX = -1;
-        priestTargetY = -1;
-        return;
-    }
-
-    //找祭司(找不到说明祭司没了,游戏已经输了,防御一下)
+    //找祭司(专门函数负责)
     int priestSN = -1;
     int priestX = 0;
     int priestY = 0;
     double priestDR = 0.0;
     double priestUR = 0.0;
     if (!findPriest(info, priestSN, priestX, priestY, priestDR, priestUR)) {
-        priestTargetX = -1;
-        priestTargetY = -1;
         return;
     }
 
-    //受击检测:探路途中血量比上一帧少,说明正在被打,立刻回安全点
-    int priestBlood = 0;
-    for (unsigned int i = 0; i < info.armies.size(); i++) {
-        if (info.armies[i].SN == priestSN) {
-            priestBlood = info.armies[i].Blood;
-            break;
+    //探路目标点:索引0~3是四角,索引4是中心点
+    const int px[5] = {12, 12, 88, 88, 50};
+    const int py[5] = {12, 88, 12, 88, 50};
+
+    //距离排序(只做一次):只对四个角点排序,中心点固定为最后一个目标
+    if (!priestVisitSorted) {
+        double dist[4];
+        int idx[4] = {0, 1, 2, 3};
+        for (int i = 0; i < 4; i++) {
+            dist[i] = distanceBlock(townX, townY, px[i], py[i]);
         }
-    }
-    if (priestLastBlood >= 0 && priestBlood < priestLastBlood) {
-        int safeX = 0;
-        int safeY = 0;
-        if (findPriestSafeSpot(info, safeX, safeY)) {
-            if (canOrder(priestSN, 3)) {
-                HumanMove(priestSN, detailOf(safeX), detailOf(safeY));
-                rememberOrder(priestSN);
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3 - i; j++) {
+                if (dist[idx[j]] > dist[idx[j + 1]]) {
+                    int tmp = idx[j];
+                    idx[j] = idx[j + 1];
+                    idx[j + 1] = tmp;
+                }
             }
         }
-        priestTargetX = -1;
-        priestTargetY = -1;
-        priestLastBlood = priestBlood;
+        //访问顺序: 最近 -> 第二近 -> 第三近 -> 第四近(最远) -> 中心点(固定索引4)
+        priestVisitOrder[0] = idx[0];
+        priestVisitOrder[1] = idx[1];
+        priestVisitOrder[2] = idx[2];
+        priestVisitOrder[3] = idx[3];
+        priestVisitOrder[4] = 4;
+        priestVisitSorted = true;
+        priestVisitIndex = 0;
+        priestMoveSent = false;
+        priestStillFrames = 0;
+        priestLastDR = priestDR;
+        priestLastUR = priestUR;
+    }
+
+    //已完成全部五个目标点
+    if (priestVisitIndex >= 5) {
         return;
     }
-    priestLastBlood = priestBlood;
 
-    //判断是否已经到达当前航点:
-    //还没设过目标 或 已经走到航点附近(<2格) 或 祭司空闲了(被打断),就重新规划下一段
-    bool arrived = (priestTargetX < 0);
-    if (!arrived) {
-        double d = distanceBlock(priestX, priestY, priestTargetX, priestTargetY);
-        if (d < 2.0) {
-            arrived = true;
+    //到达判定:连续10帧位置不变(用细节坐标判定,精度高;块坐标太粗会导致移动中误判到达)
+    double dx = priestDR - priestLastDR;
+    double dy = priestUR - priestLastUR;
+    if (dx * dx + dy * dy < 1.0) {   //每帧移动距离小于1个细节单位视为不动(祭司移动时每帧约走2个单位)
+        priestStillFrames++;
+    } else {
+        priestStillFrames = 0;
+        priestLastDR = priestDR;
+        priestLastUR = priestUR;
+    }
+
+    //真正到达:连续10帧不动
+    if (priestStillFrames >= 10 && priestMoveSent) {
+        priestVisitIndex++;
+        priestStillFrames = 0;
+        priestMoveSent = false;
+        if (priestVisitIndex >= 5) {
+            DebugText("祭司探路:按顺序走完全部目标点,探路结束");
+            return;
         }
-    }
-    if (!arrived) {
-        for (unsigned int i = 0; i < info.armies.size(); i++) {
-            if (info.armies[i].SN == priestSN && info.armies[i].NowState == HUMAN_STATE_IDLE) {
-                arrived = true;
-                break;
-            }
-        }
-    }
-    if (!arrived) {
-        return;    //还在走向航点的路上,这帧不动,别反复改方向
+        DebugText("祭司探路:到达目标(" +
+            std::to_string(px[priestVisitOrder[priestVisitIndex - 1]]) + "," +
+            std::to_string(py[priestVisitOrder[priestVisitIndex - 1]]) + "),前往下一目标");
     }
 
-    //========== 计算下一个之字形航点 ==========
-    //地图中部是目标点(100*100地图的中心)
-    const double centerX = 50.0;
-    const double centerY = 50.0;
-    double curX = (double)priestX;    //跟进祭司当前位置
-    double curY = (double)priestY;
-
-    //指向地图中部的方向(块坐标单位向量)
-    double dx = centerX - curX;
-    double dy = centerY - curY;
-    double len = sqrt(dx * dx + dy * dy);
-    if (len < 3.0) {
-        //已经到地图中部附近了,探路完成,回安全点待命
-        priestTargetX = -1;
-        priestTargetY = -1;
-        return;
-    }
-    dx /= len;
-    dy /= len;
-
-    //之字形:每段沿朝向中部的方向推进8格,同时垂直方向左右摆动6格
-    double stepLen = 8.0;
-    double swing = 6.0;
-    double nextX = curX + dx * stepLen;
-    double nextY = curY + dy * stepLen;
-
-    //垂直方向(把朝中部的方向向量旋转90度)
-    double perpX = -dy;
-    double perpY = dx;
-
-    //交替摆动:上一段往左偏,这一段就往右偏,形成锯齿
-    nextX += perpX * swing * (double)priestSwingSign;
-    nextY += perpY * swing * (double)priestSwingSign;
-    priestSwingSign = -priestSwingSign;
-
-    //限制在地图范围内(留1格边距,免得走到边界外)
-    if (nextX < 1) nextX = 1;
-    if (nextY < 1) nextY = 1;
-    if (nextX > 98) nextX = 98;
-    if (nextY > 98) nextY = 98;
-
-    //记下航点并下指令(节流,别每帧重复下)
-    priestTargetX = (int)nextX;
-    priestTargetY = (int)nextY;
-    if (canOrder(priestSN, 15)) {
-        HumanMove(priestSN, detailOf(priestTargetX), detailOf(priestTargetY));
-        rememberOrder(priestSN);
+    //发送当前目标的移动指令(每个点只发一次)
+    if (!priestMoveSent) {
+        int tIdx = priestVisitOrder[priestVisitIndex];   //重新取最新目标(到达可能已推进index)
+        HumanMove(priestSN, detailOf(px[tIdx]), detailOf(py[tIdx]));
+        priestMoveSent = true;
+        priestStillFrames = 0;
+        priestLastDR = priestDR;
+        priestLastUR = priestUR;
+        DebugText("祭司探路:前往目标(" +
+            std::to_string(px[tIdx]) + "," + std::to_string(py[tIdx]) + ")");
     }
 }
 
@@ -1922,19 +1896,42 @@ void UsrAI::priestBehavior(const tagInfo& info)
  * ===================================================================== */
 void UsrAI::strategyMain(const tagInfo& info)
 {
-    //先记录市镇中心的位置
-    if (townX < 0) {
-        for (unsigned int i = 0; i < info.buildings.size(); i++) {
-            if (info.buildings[i].Type == BUILDING_CENTER) {
-                townX = info.buildings[i].BlockDR;
-                townY = info.buildings[i].BlockUR;
-                break;
-            }
+    //找市镇中心
+    int newTownX = -1, newTownY = -1;
+    for (unsigned int i = 0; i < info.buildings.size(); i++) {
+        if (info.buildings[i].Type == BUILDING_CENTER) {
+            newTownX = info.buildings[i].BlockDR;
+            newTownY = info.buildings[i].BlockUR;
+            break;
         }
     }
-    if (townX < 0) {
+    if (newTownX < 0) {
         return;    //还没找到市镇中心,先不干活
     }
+    townX = newTownX;
+    townY = newTownY;
+
+    //新一局检测:农民数量突然大幅减少(>2个)说明是新一局
+    //(游戏内重启不重置GameFrame,但单位列表会重新初始化,数量跳回初始值;
+    // 探路阶段在第一波攻击前,农民不会被大量杀死,误判概率极低)
+    static int lastFarmerCount = -1;
+    int currentFarmerCount = (int)info.farmers.size();
+    if (lastFarmerCount >= 0 && currentFarmerCount < lastFarmerCount - 2) {
+        gameStartFrame = info.GameFrame;
+        gameStage = 1;
+        //重置祭司探路状态(新一局,避免上一局的探路进度残留导致祭司不再探路)
+        priestVisitIndex = -1;
+        priestVisitSorted = false;
+        priestMoveSent = false;
+        priestStillFrames = 0;
+        priestLastDR = -1.0;
+        priestLastUR = -1.0;
+    }
+    lastFarmerCount = currentFarmerCount;
+    if (gameStartFrame < 0) {
+        gameStartFrame = info.GameFrame;
+    }
+    int relativeFrame = info.GameFrame - gameStartFrame;
 
     //更新地图信息
     updateMapInfo(info);
@@ -1942,8 +1939,8 @@ void UsrAI::strategyMain(const tagInfo& info)
     //祭司行为接管:
     //第一波(6000帧)到来前:祭司出去探路,行为完全由priestExplore接管
     //第一波即将到来(5600帧起):结束探路,交给priestBehavior保护代码,返回安全点
-    if (info.GameFrame < PRIEST_EXPLORE_END_FRAME) {
-        priestExplore(info);          // 祭司开局探路(之字形向地图中部)
+    if (relativeFrame < PRIEST_EXPLORE_END_FRAME) {
+        priestExplore(info);          // 祭司开局探路
     } else {
         priestBehavior(info);         // 保护祭司(回安全点)
     }
@@ -1954,7 +1951,7 @@ void UsrAI::strategyMain(const tagInfo& info)
     //阶段2:防御第一波攻击,升级铜器(第一波到来~铜器升级完成)
     //阶段3:防御第二、三波攻击,规模化造兵
     //阶段4:进攻敌人基地,完成胜利目标
-    if (gameStage == 1 && info.GameFrame >= 6000) {
+    if (gameStage == 1 && relativeFrame >= 6000) {
         gameStage = 2;    //第一波来了(约4分钟),进入防御第一波阶段
     }
     if (gameStage == 2 && info.civilizationStage == CIVILIZATION_BRONZEAGE) {

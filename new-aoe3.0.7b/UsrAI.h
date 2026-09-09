@@ -45,7 +45,7 @@ private:
     // 祭司智能行为（融合初始移动和动态逃跑/回塔）
     void priestBehavior(const tagInfo& info);
 
-    // 祭司开局探路:第一波到来前,以之字形向地图中部探索
+    // 祭司开局探路:第一波到来前,依次访问 第二近->第四近->第三近->中心点(50,50)
     void priestExplore(const tagInfo& info);
 
     // 在初始箭塔周围额外建造箭塔
