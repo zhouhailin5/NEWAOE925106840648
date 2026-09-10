@@ -168,9 +168,50 @@ int UsrAI::countArmy(const tagInfo& info, int armyType)
     return num;
 }
 
-//找到距离(x,y)最近的某种资源的编号,找不到返回-1
-int UsrAI::findResource(const tagInfo& info, int resType, int x, int y)
+/* =====================================================================
+ *  找某类资源对应的存放点
+ *  说明:村民采完资源要回存放点上交,选离存放点近的资源,返程路程最短。
+ *      浆果→谷仓;木材、石头、金矿、猎物→仓库;
+ *      对应建筑都没有→市镇中心(市镇中心能存所有资源)。
+ * ===================================================================== */
+bool UsrAI::findDropoff(const tagInfo& info, int resType, int& bx, int& by)
 {
+    //浆果(和农田食物)放谷仓,其他(木/石/金/猎物)放仓库
+    int buildType = BUILDING_STOCK;
+    if (resType == RESOURCE_BUSH) {
+        buildType = BUILDING_GRANARY;
+    }
+    int dropSN = findBuilding(info, buildType);
+    if (dropSN < 0) {
+        dropSN = findBuilding(info, BUILDING_CENTER);    //退而求其次,市镇中心能存所有资源
+    }
+    if (dropSN < 0) {
+        return false;    //连市镇中心都没有,那就没法算了
+    }
+    for (unsigned int i = 0; i < info.buildings.size(); i++) {
+        if (info.buildings[i].SN == dropSN) {
+            bx = info.buildings[i].BlockDR + 1;    //3x3建筑取中心格,距离更准
+            by = info.buildings[i].BlockUR + 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* =====================================================================
+ *  找距离存放点最近的某类资源(采集效率优化)
+ *  说明:以存放点为基准遍历该类资源,选最近的一个。村民从该资源采完
+ *      返回存放点交资源的路程最短,单个采集周期耗时最少。
+ *      exclude:本帧已被分配给其他村民的资源SN,避免多人抢同一块。
+ * ===================================================================== */
+int UsrAI::findResourceNearDropoff(const tagInfo& info, int resType, const std::set<int>& exclude)
+{
+    //先找存放点(浆果→谷仓,其他→仓库,都没有→市镇中心)
+    int dropX = 0, dropY = 0;
+    if (!findDropoff(info, resType, dropX, dropY)) {
+        return -1;
+    }
+    //遍历该类资源,选距离存放点最近且未被本帧占用的
     int bestSN = -1;
     double bestDistance = 99999999.0;
     for (unsigned int i = 0; i < info.resources.size(); i++) {
@@ -180,9 +221,10 @@ int UsrAI::findResource(const tagInfo& info, int resType, int x, int y)
         if (info.resources[i].Cnt <= 0) {
             continue;    //资源采完了,跳过
         }
-        int rx = info.resources[i].BlockDR;
-        int ry = info.resources[i].BlockUR;
-        double d = distanceBlock(x, y, rx, ry);
+        if (exclude.count(info.resources[i].SN) > 0) {
+            continue;    //本帧已被别的村民选走,跳过
+        }
+        double d = distanceBlock(dropX, dropY, info.resources[i].BlockDR, info.resources[i].BlockUR);
         if (d < bestDistance) {
             bestDistance = d;
             bestSN = info.resources[i].SN;
@@ -482,6 +524,9 @@ void UsrAI::assignWork(const tagInfo& info)
     //本帧内已被分配出去的农田(避免同帧多个空闲农民选同一块)
     set<int> farmChosenThisFrame;
 
+    //本帧内已被分配出去的资源(避免同帧多个空闲农民抢同一棵树/浆果/石头/金矿)
+    set<int> resourceChosenThisFrame;
+
     //挨个看每个村民,如果他是空闲的,就给他安排工作
     for (unsigned int i = 0; i < info.farmers.size(); i++) {
         const tagFarmer& farmer = info.farmers[i];
@@ -571,15 +616,24 @@ void UsrAI::assignWork(const tagInfo& info)
         //看看这种资源还有没有,没有的话就去砍树
         int targetSN = -1;
         if (chooseWork == WORK_BERRY) {
-            targetSN = findResource(info, RESOURCE_BUSH, farmer.BlockDR, farmer.BlockUR);
+            //采集效率:选离谷仓/市镇中心(存放点)最近的浆果,返程交浆果路程最短
+            targetSN = findResourceNearDropoff(info, RESOURCE_BUSH, resourceChosenThisFrame);
         } else if (chooseWork == WORK_STONE) {
-            targetSN = findResource(info, RESOURCE_STONE, farmer.BlockDR, farmer.BlockUR);
+            //选离仓库/市镇中心最近的石头
+            targetSN = findResourceNearDropoff(info, RESOURCE_STONE, resourceChosenThisFrame);
         } else if (chooseWork == WORK_HUNT) {
-            targetSN = findResource(info, RESOURCE_GAZELLE, farmer.BlockDR, farmer.BlockUR);
+            //选离仓库/市镇中心最近的瞪羚
+            targetSN = findResourceNearDropoff(info, RESOURCE_GAZELLE, resourceChosenThisFrame);
         } else if (chooseWork == WORK_GOLD) {
-            targetSN = findResource(info, RESOURCE_GOLD, farmer.BlockDR, farmer.BlockUR);
+            //选离仓库/市镇中心最近的金矿
+            targetSN = findResourceNearDropoff(info, RESOURCE_GOLD, resourceChosenThisFrame);
         } else if (chooseWork == WORK_FARM) {
-            //种田:每人一块田,避开已经被占用的农田,就近选择
+            //种田:每人一块田,避开已经被占用的农田;选离谷仓/市镇中心最近的田,返程交粮路程最短
+            int dropX = 0, dropY = 0;
+            if (!findDropoff(info, RESOURCE_BUSH, dropX, dropY)) {
+                dropX = farmer.BlockDR;    //谷仓和市镇中心都没有,退回按村民位置选
+                dropY = farmer.BlockUR;
+            }
             int bestFarmSN = -1;
             double bestFarmDist = 99999999.0;
             for (unsigned int j = 0; j < info.buildings.size(); j++) {
@@ -590,7 +644,7 @@ void UsrAI::assignWork(const tagInfo& info)
                 if (occupiedFarm.count(b.SN) > 0 || farmChosenThisFrame.count(b.SN) > 0) {
                     continue;    //这块田已经有人种了,换一块
                 }
-                double d = distanceBlock(farmer.BlockDR, farmer.BlockUR, b.BlockDR, b.BlockUR);
+                double d = distanceBlock(dropX, dropY, b.BlockDR, b.BlockUR);
                 if (d < bestFarmDist) {
                     bestFarmDist = d;
                     bestFarmSN = b.SN;
@@ -601,14 +655,15 @@ void UsrAI::assignWork(const tagInfo& info)
                 farmChosenThisFrame.insert(bestFarmSN);    //本帧内不再分给其他农民
             }
         } else {
-            targetSN = findResource(info, RESOURCE_TREE, farmer.BlockDR, farmer.BlockUR);
+            //选离仓库/市镇中心最近的树
+            targetSN = findResourceNearDropoff(info, RESOURCE_TREE, resourceChosenThisFrame);
         }
 
         //没找到目标资源,就改成砍树
         if (targetSN < 0) {
             if (chooseWork != WORK_WOOD) {
                 chooseWork = WORK_WOOD;
-                targetSN = findResource(info, RESOURCE_TREE, farmer.BlockDR, farmer.BlockUR);
+                targetSN = findResourceNearDropoff(info, RESOURCE_TREE, resourceChosenThisFrame);
             }
         }
         if (targetSN < 0) {
@@ -619,6 +674,7 @@ void UsrAI::assignWork(const tagInfo& info)
         HumanAction(farmer.SN, targetSN);
         rememberOrder(farmer.SN);
         villagerWork[farmer.SN] = chooseWork;
+        resourceChosenThisFrame.insert(targetSN);    //本帧不再分给其他村民
     }
 }
 

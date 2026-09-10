@@ -3,6 +3,7 @@
 
 #include "ai.h"
 #include <unordered_map>
+#include <set>
 
 extern tagGame tagUsrGame;
 extern ins UsrIns;
@@ -89,8 +90,12 @@ private:
     //找祭司的安全点:有箭塔去箭塔旁,没有就去市镇中心旁(找不到返回false)
     bool findPriestSafeSpot(const tagInfo& info, int& x, int& y);
 
-    //找到距离(x,y)最近的某种资源的SN,找不到返回-1
-    int findResource(const tagInfo& info, int resType, int x, int y);
+    //找某类资源对应的存放点(浆果/农田食物→谷仓,木/石/金/猎物→仓库,都没有→市镇中心),找到返回true
+    bool findDropoff(const tagInfo& info, int resType, int& bx, int& by);
+
+    //找距离存放点最近的某类资源SN,找不到返回-1;exclude里的SN跳过(本帧已被别人选的资源)
+    //采集效率优化:按"资源到存放点的距离"选,村民返程交资源的路程最短
+    int findResourceNearDropoff(const tagInfo& info, int resType, const std::set<int>& exclude);
 
     //找到第一个已经建好的某种建筑的SN,找不到返回-1
     int findBuilding(const tagInfo& info, int buildType);
