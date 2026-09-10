@@ -83,6 +83,14 @@ static bool priestMoveSent = false;         // 当前目标的移动指令是否
 static int priestRetreatFrames = 0;           // 遇敌后撤剩余帧数(后撤期间不做到达判定,结束后切换下一目标)
 static int gameStartFrame = -1;             // 本局游戏开始时的GameFrame(计算相对帧号用,游戏内重启不重置GameFrame)
 
+//选址基准点(开局抓取一次,新一局后重新抓取):
+//军事建筑(兵营/靶场/马厩/学院/箭塔)以开局箭塔为基准,其余建筑(房屋/市场)以开局房屋为基准
+static bool basePointSet = false;            // 是否已抓取开局基准建筑
+static int homeBaseX = -1;                   // 开局自带房屋的块坐标X(其余建筑选址基准)
+static int homeBaseY = -1;                   // 开局自带房屋的块坐标Y
+static int towerBaseX = -1;                  // 开局自带箭塔的块坐标X(军事建筑选址基准)
+static int towerBaseY = -1;                  // 开局自带箭塔的块坐标Y
+
 //地图信息(0是草地,1是海洋,-1是没探索过)
 static int gameMap[100][100];
 
@@ -374,6 +382,34 @@ bool UsrAI::findBuildPlace(const tagInfo& info, int& x, int& y, int size, int ce
 }
 
 /* =====================================================================
+ *  获取选址基准点(按建筑类型分区选址)
+ *  说明:军事建筑(兵营/靶场/马厩/学院/箭塔)→开局箭塔附近;
+ *       其余建筑(房屋/市场等)→开局房屋附近;
+ *       对应基准建筑开局没有→按类别依次回退,最后回退市镇中心,保证有地方可建。
+ * ===================================================================== */
+void UsrAI::getBuildBase(int category, int& bx, int& by)
+{
+    int tx = -1, ty = -1;
+    if (category == 1) {
+        tx = towerBaseX;    //军事建筑:开局箭塔
+        ty = towerBaseY;
+        if (tx < 0) {
+            tx = homeBaseX;    //开局没有箭塔,退而用开局房屋
+            ty = homeBaseY;
+        }
+    } else {
+        tx = homeBaseX;    //其余建筑:开局房屋
+        ty = homeBaseY;
+    }
+    if (tx < 0) {
+        tx = townX;    //连房屋都没有,回退市镇中心
+        ty = townY;
+    }
+    bx = tx;
+    by = ty;
+}
+
+/* =====================================================================
  *  找祭司的编号和位置
  *  说明:军队要守在他旁边(敌人的波次会专门来杀祭司),所以要经常找他
  * ===================================================================== */
@@ -582,14 +618,14 @@ void UsrAI::assignWork(const tagInfo& info)
         int chooseWork = WORK_WOOD;    //默认去砍树
         if (gameStage <= 2) {
             //阶段1+2(游戏开始+防御第一波):食物为主,金矿铜器后才需要
-            //浆果4人(食物主力)、石头1人、打猎2人一组、农田2块、砍树上限5人
+            //浆果4人(食物主力)、石头1人、打猎2人一组、农田4块、砍树上限5人
             if (numBerry < 4) {
                 chooseWork = WORK_BERRY;
             } else if (numStone < 1) {
                 chooseWork = WORK_STONE;
             } else if (numHunt < 2) {
                 chooseWork = WORK_HUNT;
-            } else if (numFarm < 2) {
+            } else if (numFarm < 4) {
                 chooseWork = WORK_FARM;
             } else if (numWood < wantWood) {
                 chooseWork = WORK_WOOD;
@@ -732,10 +768,12 @@ void UsrAI::buildHouse(const tagInfo& info)
     if (!canOrder(workerSN, 15)) {
         return;
     }
-    //找一块能放2*2房子的空地
+    //找一块能放2*2房子的空地(房屋属于"其余建筑",以开局房屋为基准,形成居民区)
     int bx = 0;
     int by = 0;
-    if (!findBuildPlace(info, bx, by, 2, townX, townY)) {
+    int baseX = 0, baseY = 0;
+    getBuildBase(0, baseX, baseY);
+    if (!findBuildPlace(info, bx, by, 2, baseX, baseY)) {
         return;
     }
     //下指令盖房子
@@ -824,10 +862,15 @@ void UsrAI::buildSomeBuilding(const tagInfo& info, int buildingType)
     if (buildingType == BUILDING_ARROWTOWER) {
         size = 2;
     }
-    //找空地
+    //找空地:军事建筑(兵营/靶场/马厩/学院/箭塔)以开局箭塔为基准,其余(市场)以开局房屋为基准
     int bx = 0;
     int by = 0;
-    if (!findBuildPlace(info, bx, by, size, townX, townY)) {
+    bool isMilitary = (buildingType == BUILDING_ARMYCAMP || buildingType == BUILDING_RANGE
+                       || buildingType == BUILDING_STABLE || buildingType == BUILDING_COLLAGE
+                       || buildingType == BUILDING_ARROWTOWER);
+    int baseX = 0, baseY = 0;
+    getBuildBase(isMilitary ? 1 : 0, baseX, baseY);
+    if (!findBuildPlace(info, bx, by, size, baseX, baseY)) {
         return;
     }
     //下指令
@@ -847,7 +890,7 @@ void UsrAI::buildFarm(const tagInfo& info)
     if (findBuilding(info, BUILDING_MARKET) < 0) {
         return;
     }
-    //数一数现在还有食物的农田,前期留2块,铜器后留6块
+    //数一数现在还有食物的农田,前期留4块,铜器后留6块
     int liveFarm = 0;
     for (unsigned int i = 0; i < info.buildings.size(); i++) {
         if (info.buildings[i].Type == BUILDING_FARM && info.buildings[i].Percent >= 100
@@ -855,7 +898,7 @@ void UsrAI::buildFarm(const tagInfo& info)
             liveFarm++;
         }
     }
-    int wantFarm = 2;
+    int wantFarm = 4;
     if (gameStage >= 3) {
         wantFarm = 6;    //铜器后(阶段2+)6块农田
     }
@@ -907,22 +950,23 @@ void UsrAI::buildFarm(const tagInfo& info)
     if (!canOrder(workerSN, 15)) {
         return;
     }
-    //找一块3*3的空地,优先贴着市场盖(离得近好采集),不行就贴着市镇中心
-    int centerX = townX;
-    int centerY = townY;
-    int marketSN = findBuilding(info, BUILDING_MARKET);
-    if (marketSN >= 0) {
-        for (unsigned int i = 0; i < info.buildings.size(); i++) {
-            if (info.buildings[i].SN == marketSN) {
-                centerX = info.buildings[i].BlockDR;
-                centerY = info.buildings[i].BlockUR;
-                break;
-            }
-        }
-    }
+    //农田选址:优先市镇中心的上下左右4个方位,其次左上/左下/右上/右下4个对角方位
+    //(市镇中心3x3,建筑间留1格通道,农田左下角偏移4格即紧贴且不挡路)
     int bx = 0;
     int by = 0;
-    if (!findBuildPlace(info, bx, by, 3, centerX, centerY)) {
+    const int farmOffX[8] = { 0, 0, -4, 4, -4, -4, 4, 4 };   // 上 下 左 右 左上 左下 右上 右下
+    const int farmOffY[8] = { -4, 4, 0, 0, -4, 4, -4, 4 };
+    bool placed = false;
+    for (int i = 0; i < 8; i++) {
+        if (canBuildHere(info, townX + farmOffX[i], townY + farmOffY[i], 3)) {
+            bx = townX + farmOffX[i];
+            by = townY + farmOffY[i];
+            placed = true;
+            break;
+        }
+    }
+    //8个方位都放不下,回退:以市镇中心圈层搜索,保证农田能建出来
+    if (!placed) {
         if (!findBuildPlace(info, bx, by, 3, townX, townY)) {
             return;    //实在找不到空地
         }
@@ -2079,8 +2123,31 @@ void UsrAI::strategyMain(const tagInfo& info)
         priestLastDR = -1.0;
         priestLastUR = -1.0;
         priestRetreatFrames = 0;
+        //重置选址基准(新一局地图可能不同,重新抓取开局房屋/箭塔坐标)
+        basePointSet = false;
+        homeBaseX = -1;
+        homeBaseY = -1;
+        towerBaseX = -1;
+        towerBaseY = -1;
     }
     lastFarmerCount = currentFarmerCount;
+
+    //选址基准抓取:开局(或新一局重置后)记录开局自带房屋/箭塔坐标,作为分区选址的基准点
+    if (!basePointSet) {
+        for (unsigned int i = 0; i < info.buildings.size(); i++) {
+            if (homeBaseX < 0 && info.buildings[i].Type == BUILDING_HOME
+                && info.buildings[i].Percent >= 100) {
+                homeBaseX = info.buildings[i].BlockDR;
+                homeBaseY = info.buildings[i].BlockUR;
+            }
+            if (towerBaseX < 0 && info.buildings[i].Type == BUILDING_ARROWTOWER
+                && info.buildings[i].Percent >= 100) {
+                towerBaseX = info.buildings[i].BlockDR;
+                towerBaseY = info.buildings[i].BlockUR;
+            }
+        }
+        basePointSet = true;
+    }
     if (gameStartFrame < 0) {
         gameStartFrame = info.GameFrame;
     }

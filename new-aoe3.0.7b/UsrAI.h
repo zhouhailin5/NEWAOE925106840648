@@ -58,6 +58,9 @@ private:
     //派一个村民去盖房子
     void buildHouse(const tagInfo& info);
 
+    //获取选址基准点:军事建筑(category=1)→开局箭塔,其余→开局房屋;均没有则回退市镇中心
+    void getBuildBase(int category, int& bx, int& by);
+
     //派一个村民去盖其他建筑(市场、兵营、靶场、马厩、箭塔、学院等)
     void buildSomeBuilding(const tagInfo& info, int buildingType);
 
