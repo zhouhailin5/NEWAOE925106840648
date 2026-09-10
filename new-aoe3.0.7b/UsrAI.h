@@ -109,6 +109,12 @@ private:
     //数一数某种士兵有几个
     int countArmy(const tagInfo& info, int armyType);
 
+    //判断某建筑是否正在忙(Project不为0)
+    bool isBuildingBusy(const tagInfo& info, int sn);
+
+    //找空闲村民,优先之前的建造工,其次任意空闲村民;找不到返回-1
+    int findIdleWorker(const tagInfo& info);
+
     //判断(x,y)这个位置能不能放下size*size的建筑
     bool canBuildHere(const tagInfo& info, int x, int y, int size);
 
