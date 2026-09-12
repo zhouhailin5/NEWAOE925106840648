@@ -49,9 +49,6 @@ private:
     // 祭司开局探路:第一波到来前,依次访问 第二近->第四近->第三近->中心点(50,50)
     void priestExplore(const tagInfo& info);
 
-    // 在初始箭塔周围额外建造箭塔
-    void buildExtraTowers(const tagInfo& info);
-
     //给空闲的村民分配工作(砍树、采浆果、挖石头等)
     void assignWork(const tagInfo& info);
 
@@ -119,6 +116,9 @@ private:
 
     //找空闲村民,优先之前的建造工,其次任意空闲村民;找不到返回-1
     int findIdleWorker(const tagInfo& info);
+
+    //返回资源的块占地边长:石头/金矿/树林为2,其余为1(对齐内核尺寸)
+    int resourceBlockSize(int resType);
 
     //判断(x,y)这个位置能不能放下size*size的建筑
     bool canBuildHere(const tagInfo& info, int x, int y, int size);
