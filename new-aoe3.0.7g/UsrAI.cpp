@@ -1,6 +1,5 @@
 #include "UsrAI.h"
 #include<set>
-#include<vector>
 #include<unordered_map>
 #include<list>
 #include <cstdlib>
@@ -66,8 +65,7 @@ static int priestLastBlood = -1;          //祭司上一帧血量,用于受击�
 static int priestVisitIndex = -1;         //当前访问第几个目标,-1未开始,0~3循环直到探路结束
 static int priestVisitOrder[4];           //访问顺序,存点位索引,0~3角点,4为中心
 static bool priestVisitSorted = false;    //四点是否已完成到基地的距离排序
-static int priestStillFrames = 0;         //祭司连续静止帧数,连续10帧触发到达/重试判定
-static int priestStuckTotal = 0;          //祭司真正连续静止的累计帧数(重试不清零),超过50强制推进下一目标
+static int priestStillFrames = 0;         //祭司连续静止帧数,连续10帧视为到达
 static double priestLastDR = -1.0;        //祭司上一帧细节坐标X,到达判定用
 static double priestLastUR = -1.0;        //祭司上一帧细节坐标Y
 static bool priestMoveSent = false;       //当前目标的移动指令是否已发送
@@ -268,15 +266,6 @@ int UsrAI::findResourceNearDropoff(const tagInfo& info, int resType, const std::
     return bestSN;
 }
 
-//返回资源的块占地边长,对齐内核尺寸:石头/金矿2x2,树木含2x2树林(AI侧同为RESOURCE_TREE)保守按2,其余1x1
-int UsrAI::resourceBlockSize(int resType)
-{
-    if (resType == RESOURCE_STONE || resType == RESOURCE_GOLD || resType == RESOURCE_TREE) {
-        return 2;
-    }
-    return 1;
-}
-
 //判断(x,y)能否放下size*size的建筑
 bool UsrAI::canBuildHere(const tagInfo& info, int x, int y, int size)
 {
@@ -340,12 +329,11 @@ bool UsrAI::canBuildHere(const tagInfo& info, int x, int y, int size)
             return false;
         }
     }
-    //检查是否与资源重叠,树、石头、金矿等;石头/金矿/树林为2x2,按占地矩形判相交
+    //检查是否与资源重叠,树、石头、金矿等
     for (unsigned int i = 0; i < info.resources.size(); i++) {
         int rX = info.resources[i].BlockDR;
         int rY = info.resources[i].BlockUR;
-        int rSize = resourceBlockSize(info.resources[i].Type);
-        if (rX < x + size && rX + rSize > x && rY < y + size && rY + rSize > y) {
+        if (rX >= x && rX < x + size && rY >= y && rY < y + size) {
             return false;
         }
     }
@@ -1001,6 +989,106 @@ void UsrAI::buildFarm(const tagInfo& info)
 }
 
 /* =====================================================================
+ *  在已有箭塔周围补建箭塔,形成三角形布局增强防守
+ * ===================================================================== */
+void UsrAI::buildExtraTowers(const tagInfo& info)
+{
+    //需先解锁箭塔科技
+    if (!hasArrowTech) {
+        return;
+    }
+
+    //统计已建成箭塔数量,记录第一座坐标作参考
+    int towerCount = 0;
+    int refX = -1, refY = -1;
+    for (const auto& b : info.buildings) {
+        if (b.Type == BUILDING_ARROWTOWER && b.Percent >= 100) {
+            towerCount++;
+            if (refX == -1) {
+                refX = b.BlockDR;
+                refY = b.BlockUR;
+            }
+        }
+    }
+
+    //目标3座,初始1座加额外2座,太多会把单位挤住
+    const int TARGET_TOWERS = 3;
+    if (towerCount >= TARGET_TOWERS) {
+        return;
+    }
+
+    //检查石头是否足够
+    if (info.Stone < 150) {
+        return;
+    }
+
+    //找空闲陆地村民
+    int workerSN = -1;
+    for (const auto& farmer : info.farmers) {
+        if (farmer.FarmerSort != FARMERTYPE_FARMER) continue;
+        if (farmer.NowState == HUMAN_STATE_IDLE) {
+            workerSN = farmer.SN;
+            break;
+        }
+    }
+    if (workerSN < 0) {
+        return;
+    }
+
+    //参考中心用第一座箭塔,没有则用市镇中心
+    int centerX = (refX >= 0) ? refX : townX;
+    int centerY = (refY >= 0) ? refY : townY;
+    if (centerX < 0 || centerY < 0) {
+        return;
+    }
+
+    //三个互不共线的偏移方向
+    const int OFFSET_COUNT = 3;
+    const int offX[OFFSET_COUNT] = { 3,  3, -3 };
+    const int offY[OFFSET_COUNT] = { 3, -3,  3 };
+
+    //按已有箭塔数量选主偏移,1座建第二塔用索引0,2座建第三塔用索引1
+    int mainIdx = (towerCount == 1) ? 0 : 1;
+
+    int bx = 0, by = 0;
+    bool placed = false;
+
+    //先试主偏移
+    if (findBuildPlace(info, bx, by, 2, centerX + offX[mainIdx], centerY + offY[mainIdx])) {
+        placed = true;
+    }
+
+    //主偏移不行就按顺序试另外两个
+    if (!placed) {
+        for (int i = 1; i < OFFSET_COUNT; ++i) {
+            int idx = (mainIdx + i) % OFFSET_COUNT;
+            if (findBuildPlace(info, bx, by, 2, centerX + offX[idx], centerY + offY[idx])) {
+                placed = true;
+                break;
+            }
+        }
+    }
+
+    //都失败则以参考中心本身为搜索中心,通常用不到
+    if (!placed) {
+        if (findBuildPlace(info, bx, by, 2, centerX, centerY)) {
+            placed = true;
+        }
+    }
+
+    if (!placed) {
+        return;
+    }
+
+    //控制指令频率后建造
+    if (!canOrder(workerSN, 15)) {
+        return;
+    }
+    HumanBuild(workerSN, BUILDING_ARROWTOWER, bx, by);
+    rememberOrder(workerSN);
+}
+
+/* =====================================================================
  *  研究科技
  *  造兵永远优先。第二波之前只研究箭塔科技、箭塔升级和工具使用,
  *  其余科技推后,把食物和建筑时间省下来造兵。
@@ -1198,21 +1286,6 @@ void UsrAI::makeArmy(const tagInfo& info)
     if (info.Human_Num + 1 > info.Human_MaxNum) {
         return;
     }
-    //第一波前只造3名棍棒兵,不造弓箭手等其他兵种
-    if (gameStage == 1) {
-        if (countArmy(info, AT_CLUBMAN) >= 3) {
-            return;
-        }
-        int earlyCampSN = findBuilding(info, BUILDING_ARMYCAMP);
-        if (earlyCampSN < 0 || isBuildingBusy(info, earlyCampSN)) {
-            return;
-        }
-        if (info.Meat >= BUILDING_ARMYCAMP_CREATE_CLUBMAN_FOOD) {
-            BuildingAction(earlyCampSN, BUILDING_ARMYCAMP_CREATE_CLUBMAN);
-            rememberOrder(earlyCampSN);
-        }
-        return;
-    }
     //目标兵力数,含祭司和侦察兵
     int wantArmy = 6;                 //第一波前6个
     if (info.GameFrame >= 13500) {
@@ -1366,23 +1439,13 @@ void UsrAI::armyFight(const tagInfo& info)
     }
 
     if (enemySN < 0) {
-        //无敌人,空闲士兵回集结点;第一波前棍棒兵到箭塔旁边待命
+        //无敌人,空闲士兵全部回集结点
         for (unsigned int i = 0; i < info.armies.size(); i++) {
             const tagArmy& army = info.armies[i];
             if (army.Sort == AT_PRIEST || army.Sort == AT_SCOUT) {
                 continue;    //祭司和侦察兵除外
             }
             if (army.NowState != HUMAN_STATE_IDLE) {
-                continue;
-            }
-            //第一波前棍棒兵到箭塔旁边,离箭塔超过2格就移动过去
-            if (gameStage == 1 && army.Sort == AT_CLUBMAN) {
-                if (distanceBlock(army.BlockDR, army.BlockUR, safeX, safeY) > 2.0) {
-                    if (canOrder(army.SN, 30)) {
-                        HumanMove(army.SN, detailOf(safeX), detailOf(safeY));
-                        rememberOrder(army.SN);
-                    }
-                }
                 continue;
             }
             if (distanceBlock(army.BlockDR, army.BlockUR, rallyX, rallyY) > 4.0) {
@@ -1396,80 +1459,6 @@ void UsrAI::armyFight(const tagInfo& info)
     }
 
     //有敌人则全军集火最近的敌人
-    //第一波前:3名棍棒兵分散分配目标,确保视野内每个敌人至少被一个兵攻击
-    if (gameStage == 1) {
-        //1.收集祭司20格视野内的全部敌人(军队、农民、建筑)
-        std::vector<int> targetList;
-        std::vector<double> targetDist;
-        for (unsigned int i = 0; i < info.enemy_armies.size(); i++) {
-            double d = distanceBlock(info.enemy_armies[i].BlockDR, info.enemy_armies[i].BlockUR, priestX, priestY);
-            if (d <= 20.0) {
-                targetList.push_back(info.enemy_armies[i].SN);
-                targetDist.push_back(d);
-            }
-        }
-        for (unsigned int i = 0; i < info.enemy_farmers.size(); i++) {
-            double d = distanceBlock(info.enemy_farmers[i].BlockDR, info.enemy_farmers[i].BlockUR, priestX, priestY);
-            if (d <= 20.0) {
-                targetList.push_back(info.enemy_farmers[i].SN);
-                targetDist.push_back(d);
-            }
-        }
-        for (unsigned int i = 0; i < info.enemy_buildings.size(); i++) {
-            double d = distanceBlock(info.enemy_buildings[i].BlockDR, info.enemy_buildings[i].BlockUR, priestX, priestY);
-            if (d <= 20.0) {
-                targetList.push_back(info.enemy_buildings[i].SN);
-                targetDist.push_back(d);
-            }
-        }
-        //2.敌人按距离从近到远排序,敌人多于兵时优先覆盖最近的
-        for (unsigned int a = 0; a < targetList.size(); a++) {
-            unsigned int best = a;
-            for (unsigned int b = a + 1; b < targetList.size(); b++) {
-                if (targetDist[b] < targetDist[best]) {
-                    best = b;
-                }
-            }
-            if (best != a) {
-                int tmpSN = targetList[a];
-                targetList[a] = targetList[best];
-                targetList[best] = tmpSN;
-                double tmpD = targetDist[a];
-                targetDist[a] = targetDist[best];
-                targetDist[best] = tmpD;
-            }
-        }
-        //3.收集可参战的棍棒兵(跟随祭司,均在战场范围内)
-        std::vector<int> clubList;
-        for (unsigned int i = 0; i < info.armies.size(); i++) {
-            const tagArmy& army = info.armies[i];
-            if (army.Sort != AT_CLUBMAN) {
-                continue;
-            }
-            if (army.NowState != HUMAN_STATE_IDLE && army.NowState != HUMAN_STATE_WALKING) {
-                continue;
-            }
-            clubList.push_back(army.SN);
-        }
-        //4.目标分配:兵k先一一对应敌人k,保证每个敌人至少一个兵;兵多于敌人则循环补到敌人
-        if (!targetList.empty() && !clubList.empty()) {
-            for (unsigned int k = 0; k < clubList.size(); k++) {
-                if (!canOrder(clubList[k], 8)) {
-                    continue;
-                }
-                unsigned int targetIdx;
-                if (k < targetList.size()) {
-                    targetIdx = k;    //第一轮:兵k攻击敌人k,分散覆盖
-                } else {
-                    targetIdx = (k - (unsigned int)targetList.size()) % targetList.size();    //多余兵循环补
-                }
-                HumanAction(clubList[k], targetList[targetIdx]);
-                rememberOrder(clubList[k]);
-            }
-        }
-        return;
-    }
-
     for (unsigned int i = 0; i < info.armies.size(); i++) {
         const tagArmy& army = info.armies[i];
         if (army.Sort == AT_PRIEST) {
@@ -1650,13 +1639,13 @@ void UsrAI::priestExplore(const tagInfo& info)
                 //敌人离开,计算与当前目标点的距离
                 int retreatCurIdx = priestVisitOrder[priestVisitIndex];
                 double retreatTargetDist = distanceBlock(priestX, priestY, px[retreatCurIdx], py[retreatCurIdx]);
-                if (retreatTargetDist < 40.0) {
-                    //敌人离开且距当前目标点小于40格,切换下一目标
+                if (retreatTargetDist < 30.0) {
+                    //距当前目标点小于30格,切换下一目标
                     priestVisitIndex = (priestVisitIndex + 1) % 4;
                     priestMoveSent = false;
                     priestStillFrames = 0;
                 } else {
-                    //后撤后离当前目标点过远(≥40格),不切换,重新向当前目标点移动
+                    //后撤后离当前目标点过远,不切换,重新向当前目标点移动
                     priestMoveSent = false;
                     priestStillFrames = 0;
                 }
@@ -1706,26 +1695,20 @@ void UsrAI::priestExplore(const tagInfo& info)
     double dy = priestUR - priestLastUR;
     if (dx * dx + dy * dy < 1.0) {   //每帧移动小于1个细节单位视为不动,祭司每帧约走2个单位
         priestStillFrames++;
-        priestStuckTotal++;          //连续静止累计,只有真正发生位移才清零
     } else {
         priestStillFrames = 0;
-        priestStuckTotal = 0;        //实际移动了,重置卡死累计
         priestLastDR = priestDR;
         priestLastUR = priestUR;
     }
 
-    //推进下一目标有两种情况:
-    //1)连续静止10帧且距当前目标点小于15格,视为正常到达;
-    //2)连续静止累计超过50帧,说明长时间被卡住,放弃当前目标强制推进;
-    //其余情况(静止10帧但距目标≥15且累计未超50)不切换,重新向当前目标点下令
+    //连续10帧不动:距当前目标点小于15格视为到达并切换下一目标;
+    //距当前目标点大于等于15格说明移动指令未生效或被卡住,不切换目标,重新向当前目标点下令,避免原地永久不动
     if (priestStillFrames >= 10 && priestMoveSent) {
         int arriveIdx = priestVisitOrder[priestVisitIndex];
         double arriveTargetDist = distanceBlock(priestX, priestY, px[arriveIdx], py[arriveIdx]);
-        bool normalArrive = (arriveTargetDist < 15.0);       //正常到达
-        bool stuckForceAdvance = (priestStuckTotal > 50);    //静止累计超50强制推进
-        if (normalArrive || stuckForceAdvance) {
+        if (arriveTargetDist < 15.0) {
+            //静止10帧且距当前目标点小于15格,到达,切换下一目标
             priestVisitIndex = (priestVisitIndex + 1) % 4;   //循环切换
-            priestStuckTotal = 0;                            //推进后重置卡死累计
         }
         //无论切换到新目标还是重试当前目标,都复位指令状态,由末尾发令代码重新HumanMove
         priestStillFrames = 0;
@@ -2006,7 +1989,6 @@ void UsrAI::strategyMain(const tagInfo& info)
         priestVisitSorted = false;
         priestMoveSent = false;
         priestStillFrames = 0;
-        priestStuckTotal = 0;
         priestLastDR = -1.0;
         priestLastUR = -1.0;
         priestRetreatFrames = 0;
@@ -2070,6 +2052,7 @@ void UsrAI::strategyMain(const tagInfo& info)
     makeArmy(info);          //造兵,科技靠后,波次来了才有兵
     researchTech(info);      //研究科技
     buildHouse(info);        //盖房子
+    buildExtraTowers(info);  //科技解锁后补箭塔
     buildSomeBuilding(info, BUILDING_MARKET);      //盖市场
     buildSomeBuilding(info, BUILDING_ARMYCAMP);    //盖兵营
     buildSomeBuilding(info, BUILDING_RANGE);       //盖靶场
