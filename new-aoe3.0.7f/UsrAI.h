@@ -93,6 +93,11 @@ private:
     //找祭司的安全点:有箭塔去箭塔旁,没有就去市镇中心旁(找不到返回false)
     bool findPriestSafeSpot(const tagInfo& info, int& x, int& y);
 
+    //在已探明且可到达区域(从祭司当前位置泛洪、只经过已探明草地)中,
+    //选离目标角点(cornerX,cornerY)最近的格子作为临时目标点,结果由outX/outY返回;找到返回true
+    bool findTempTargetNearCorner(int cornerX, int cornerY, int priestBX, int priestBY,
+                                  int& outX, int& outY);
+
     //找某类资源对应的存放点(浆果/农田食物→谷仓,木/石/金/猎物→仓库,都没有→市镇中心),找到返回true
     bool findDropoff(const tagInfo& info, int resType, int& bx, int& by);
 

@@ -65,7 +65,8 @@ static int priestLastBlood = -1;          //祭司上一帧血量,用于受击�
 static int priestVisitIndex = -1;         //当前访问第几个目标,-1未开始,0~3循环直到探路结束
 static int priestVisitOrder[4];           //访问顺序,存点位索引,0~3角点,4为中心
 static bool priestVisitSorted = false;    //四点是否已完成到基地的距离排序
-static int priestStillFrames = 0;         //祭司连续静止帧数,连续10帧视为到达
+static int priestStillFrames = 0;         //祭司连续静止帧数,连续10帧触发到达/重试判定
+static int priestStuckTotal = 0;          //祭司真正连续静止的累计帧数(重试不清零),超过50强制推进下一目标
 static double priestLastDR = -1.0;        //祭司上一帧细节坐标X,到达判定用
 static double priestLastUR = -1.0;        //祭司上一帧细节坐标Y
 static bool priestMoveSent = false;       //当前目标的移动指令是否已发送
@@ -476,6 +477,91 @@ bool UsrAI::findPriestSafeSpot(const tagInfo& info, int& x, int& y)
         return true;
     }
     return false;
+}
+
+/* =====================================================================
+ *  在已探明且可到达区域中,找离目标角点最近的格子作为临时目标点
+ *  角点可能尚未探明或不可走(海洋),不能直接下令前往;
+ *  从祭司当前位置出发,只经过gameMap==0(已探明草地)做泛洪,
+ *  泛洪可达的格子即"已探明且可到达",在其中取距角点最近者。
+ * ===================================================================== */
+bool UsrAI::findTempTargetNearCorner(int cornerX, int cornerY, int priestBX, int priestBY,
+                                     int& outX, int& outY)
+{
+    //可达标记
+    bool reach[100][100];
+    for (int i = 0; i < 100; i++) {
+        for (int j = 0; j < 100; j++) {
+            reach[i][j] = false;
+        }
+    }
+
+    //BFS队列,最多100*100个格子
+    int qx[10000], qy[10000];
+    int head = 0, tail = 0;
+    //起点必须是已探明草地
+    if (priestBX >= 0 && priestBX < 100 && priestBY >= 0 && priestBY < 100
+        && gameMap[priestBX][priestBY] == 0) {
+        reach[priestBX][priestBY] = true;
+        qx[tail] = priestBX;
+        qy[tail] = priestBY;
+        tail++;
+    }
+    //四方向泛洪,只走已探明草地
+    const int stepX[4] = { 1, -1, 0,  0 };
+    const int stepY[4] = { 0,  0, 1, -1 };
+    while (head < tail) {
+        int cx = qx[head];
+        int cy = qy[head];
+        head++;
+        for (int d = 0; d < 4; d++) {
+            int nx = cx + stepX[d];
+            int ny = cy + stepY[d];
+            if (nx < 0 || nx >= 100 || ny < 0 || ny >= 100) {
+                continue;
+            }
+            if (reach[nx][ny]) {
+                continue;
+            }
+            if (gameMap[nx][ny] != 0) {
+                continue;    //海洋或未探明不可走
+            }
+            reach[nx][ny] = true;
+            qx[tail] = nx;
+            qy[tail] = ny;
+            tail++;
+        }
+    }
+
+    //在可达集合中找距目标角点最近的格子
+    int bestX = priestBX;
+    int bestY = priestBY;
+    int bestDist = 1 << 30;
+    bool found = false;
+    for (int i = 0; i < 100; i++) {
+        for (int j = 0; j < 100; j++) {
+            if (!reach[i][j]) {
+                continue;
+            }
+            int d = abs(i - cornerX) + abs(j - cornerY);
+            if (d < bestDist) {
+                bestDist = d;
+                bestX = i;
+                bestY = j;
+                found = true;
+            }
+        }
+    }
+
+    if (!found) {
+        //无可达已探明草地,兜底返回祭司当前位置
+        outX = priestBX;
+        outY = priestBY;
+        return false;
+    }
+    outX = bestX;
+    outY = bestY;
+    return true;
 }
 
 /* =====================================================================
@@ -1551,10 +1637,19 @@ void UsrAI::priestExplore(const tagInfo& info)
                 //敌人仍在,继续后撤,不切换目标
                 priestRetreatFrames = PRIEST_RETREAT_FRAMES;
             } else {
-                //敌人离开,切换下一目标
-                priestVisitIndex = (priestVisitIndex + 1) % 4;
-                priestMoveSent = false;
-                priestStillFrames = 0;
+                //敌人离开,计算与当前目标点的距离
+                int retreatCurIdx = priestVisitOrder[priestVisitIndex];
+                double retreatTargetDist = distanceBlock(priestX, priestY, px[retreatCurIdx], py[retreatCurIdx]);
+                if (retreatTargetDist < 30.0) {
+                    //距当前目标点小于30格,切换下一目标
+                    priestVisitIndex = (priestVisitIndex + 1) % 4;
+                    priestMoveSent = false;
+                    priestStillFrames = 0;
+                } else {
+                    //后撤后离当前目标点过远,不切换,重新向当前目标点移动
+                    priestMoveSent = false;
+                    priestStillFrames = 0;
+                }
             }
         }
         return;    //后撤期间不做到达判定,不发移动指令
@@ -1601,16 +1696,28 @@ void UsrAI::priestExplore(const tagInfo& info)
     double dy = priestUR - priestLastUR;
     if (dx * dx + dy * dy < 1.0) {   //每帧移动小于1个细节单位视为不动,祭司每帧约走2个单位
         priestStillFrames++;
+        priestStuckTotal++;          //连续静止累计,只有真正发生位移才清零
     } else {
         priestStillFrames = 0;
+        priestStuckTotal = 0;        //实际移动了,重置卡死累计
         priestLastDR = priestDR;
         priestLastUR = priestUR;
     }
 
-    //连续10帧不动则视为到达,切换下一目标
+    //推进下一目标有两种情况:
+    //1)连续静止10帧且距当前目标点小于15格,视为正常到达;
+    //2)连续静止累计超过50帧,说明长时间被卡住,放弃当前目标强制推进;
+    //其余情况(静止10帧但距目标≥15且累计未超50)不切换,重新向当前目标点下令
     if (priestStillFrames >= 10 && priestMoveSent) {
-        int oldIdx = priestVisitOrder[priestVisitIndex];
-        priestVisitIndex = (priestVisitIndex + 1) % 4;   //循环切换
+        int arriveIdx = priestVisitOrder[priestVisitIndex];
+        double arriveTargetDist = distanceBlock(priestX, priestY, px[arriveIdx], py[arriveIdx]);
+        bool normalArrive = (arriveTargetDist < 15.0);       //正常到达
+        bool stuckForceAdvance = (priestStuckTotal > 50);    //静止累计超50强制推进
+        if (normalArrive || stuckForceAdvance) {
+            priestVisitIndex = (priestVisitIndex + 1) % 4;   //循环切换
+            priestStuckTotal = 0;                            //推进后重置卡死累计
+        }
+        //无论切换到新目标还是重试当前目标,都复位指令状态,由末尾发令代码重新HumanMove
         priestStillFrames = 0;
         priestMoveSent = false;
     }
@@ -1618,7 +1725,12 @@ void UsrAI::priestExplore(const tagInfo& info)
     //发送当前目标移动指令,每点只发一次
     if (!priestMoveSent) {
         int tIdx = priestVisitOrder[priestVisitIndex];   //重取最新目标,到达可能已推进index
-        HumanMove(priestSN, detailOf(px[tIdx]), detailOf(py[tIdx]));
+        //不直接下令去角点(角点可能未探明或不可走),改为在已探明且可到达区域中,
+        //选离当前目标角点最近的格子作为临时目标点;找不到时兜底用角点本身
+        int tempX = px[tIdx];
+        int tempY = py[tIdx];
+        findTempTargetNearCorner(px[tIdx], py[tIdx], priestX, priestY, tempX, tempY);
+        HumanMove(priestSN, detailOf(tempX), detailOf(tempY));
         priestMoveSent = true;
         priestStillFrames = 0;
         priestLastDR = priestDR;
@@ -1884,6 +1996,7 @@ void UsrAI::strategyMain(const tagInfo& info)
         priestVisitSorted = false;
         priestMoveSent = false;
         priestStillFrames = 0;
+        priestStuckTotal = 0;
         priestLastDR = -1.0;
         priestLastUR = -1.0;
         priestRetreatFrames = 0;
